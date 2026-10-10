@@ -1,0 +1,59 @@
+﻿# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependencies and generated builds
+node_modules/
+dist/
+dist-ssr/
+build/
+coverage/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Firebase and cloud credentials
+main-key.json
+backup-key.json
+*service-account*.json
+
+# Local application data - do not upload production data
+/activities.json
+/ai_cache_store.json
+/ai_scenarios.json
+/notifications.json
+/projects.json
+/project_plans.json
+/subscription_requests.json
+/token_consumption_logs.json
+/users.json
+
+# Recordings and editor files
+recordings/
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Local backups, uploads, and runtime data
+/data/project_backups/
+/data/uploads/
+/data/uploaded_files.json
+/data/ai_testcase_jobs.json
+
+# Generated test videos and artifacts
+/data/artifacts/
+/public/artifacts/
+/test_doc.txt
