@@ -55,7 +55,7 @@ import { signOut, onIdTokenChanged } from "firebase/auth";
 import { db, auth, handleFirestoreError, OperationType } from "./firebase";
 import { syncUpdateDoc, syncSetDoc } from "./services/firestoreSync";
 import { clearStaleAuthSession, logAuthDiagnostic, performSafeLogout } from "./services/authService";
-import seededUsers from './users.json';
+import seededUsers from './services/seededUsers';
 import { Toaster } from 'sonner';
 import ErrorBoundary from './components/ErrorBoundary';
 import Dashboard from './components/Dashboard';

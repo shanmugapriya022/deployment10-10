@@ -15,7 +15,7 @@ import {
 import { db, handleFirestoreError, OperationType } from "../firebase";
 import { syncAddDoc, syncUpdateDoc, syncDeleteDoc, syncSetDoc } from "./firestoreSync";
 import { isApiTestingScenario, isApiTestingCase, TestCase, TestScenario, Project, User, UserRole } from "../types";
-import seededUsers from "../users.json";
+import seededUsers from "./seededUsers";
 import { logger } from "./appLogger";
 import {
   saveFolderToFirestore,

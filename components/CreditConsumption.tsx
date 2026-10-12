@@ -86,7 +86,7 @@ import {
   isLogMatchingProject,
   getProjectDisplayName
 } from '../services/tokenConsumptionService';
-import seededUsers from '../users.json';
+import seededUsers from '../services/seededUsers';
 import {
   getSubscriptionRequests,
   getLocalSubscriptionRequests,

@@ -33,7 +33,7 @@ import { User, UserRole, Project, NotificationType } from '../types';
 import { logActivity } from '../services/activityService';
 import { createNotification } from '../services/notificationService';
 import { syncUpdateDoc, syncDeleteDoc } from '../services/firestoreSync';
-import seededUsers from '../users.json';
+import seededUsers from '../services/seededUsers';
 
 interface UserManagementProps {
   currentUser: User;

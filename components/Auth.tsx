@@ -13,7 +13,7 @@ import { syncSetDoc } from '../services/firestoreSync';
 import { parseApiResponse } from '../services/apiUtils';
 import { clearStaleAuthSession, logAuthDiagnostic } from '../services/authService';
 import { signOut } from 'firebase/auth';
-import seededUsers from '../users.json';
+import seededUsers from '../services/seededUsers';
 import { AutomatiqaLogo } from './AutomatiqaLogo';
 
 interface AuthProps {
