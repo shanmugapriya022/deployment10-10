@@ -2984,10 +2984,10 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
 
         if (rawBlobOrFile) {
           try {
+            // Keep a local recovery copy under the stable folder ID. The file
+            // name alone can collide when different folders use the same
+            // uploaded filename.
             await saveVideoBlob(targetFolderId, rawBlobOrFile, videoFileName);
-            if (videoFileName) {
-              await saveVideoBlob(videoFileName, rawBlobOrFile, videoFileName);
-            }
           } catch (e) {
             console.warn('[handleConfirmSaveGeneratedCases] IndexedDB save notice:', e);
           }

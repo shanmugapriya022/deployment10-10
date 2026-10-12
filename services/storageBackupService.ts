@@ -13,6 +13,35 @@ import { generateUniqueFolderId } from '../utils/idGenerator';
 
 // 1. In-Memory Project Cache (survives component remounts and async calls)
 const memoryProjectCache = new Map<string, Project>();
+const serverBackupWriteQueues = new Map<string, Promise<void>>();
+
+/** Serialize backup requests per project so delayed writes cannot replace a newer snapshot. */
+export const queueProjectBackupWrite = (project: Project | Record<string, any>): Promise<void> => {
+  const projectId = String(project?.id || '');
+  if (!projectId || typeof window === 'undefined' || !window.fetch) return Promise.resolve();
+
+  let body: string;
+  try {
+    body = JSON.stringify(project);
+  } catch (error) {
+    return Promise.reject(error);
+  }
+
+  const previous = serverBackupWriteQueues.get(projectId) || Promise.resolve();
+  const write = previous.catch(() => {}).then(async () => {
+    const response = await fetch(`/api/projects/backup/${encodeURIComponent(projectId)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body
+    });
+    if (!response.ok) throw new Error(`Project backup failed (${response.status})`);
+  });
+  serverBackupWriteQueues.set(projectId, write);
+  void write.finally(() => {
+    if (serverBackupWriteQueues.get(projectId) === write) serverBackupWriteQueues.delete(projectId);
+  }).catch(() => {});
+  return write;
+};
 
 // Helper to check if IndexedDB is available
 const hasIndexedDb = (): boolean => {
@@ -382,6 +411,8 @@ export const saveProjectBackup = async (project: Project): Promise<void> => {
 
   // 1. In-Memory Cache update immediately
   memoryProjectCache.set(syncedProject.id, { ...syncedProject });
+  // Queue before the IndexedDB await below, preserving call order across rapid saves.
+  queueProjectBackupWrite(syncedProject).catch(() => {});
 
   // 1b. Dedicated lightweight performance scripts backup (immune to 5MB localStorage limits)
   if (Array.isArray(syncedProject.performanceScripts)) {
@@ -476,20 +507,7 @@ export const saveProjectBackup = async (project: Project): Promise<void> => {
     // Ignore localStorage QuotaExceededError safely - IndexedDB and Server disk backup already have the full copy
   }
 
-  // 4. Server Disk Backup endpoint (/api/projects/backup/:id)
-  try {
-    if (typeof window !== 'undefined' && window.fetch) {
-      fetch(`/api/projects/backup/${syncedProject.id}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(syncedProject)
-      }).catch(() => {
-        // Non-blocking background sync
-      });
-    }
-  } catch {
-    // Non-blocking
-  }
+  // 4. Server disk backup was queued synchronously above, before any async storage work.
 };
 
 /**
@@ -1205,6 +1223,8 @@ export const mergePerformanceScriptsWithBackup = (
   const memScripts = cachedProject?.performanceScripts || [];
 
   const scriptMap = new Map<string, PerformanceScript>();
+  const isFirestoreTrimmed = (value: unknown): boolean =>
+    typeof value === 'string' && /\[(?:trimmed|truncated) for Firestore\]/i.test(value);
 
   // 1. Index firestore scripts first
   (firestoreScripts || []).forEach(s => {
@@ -1228,7 +1248,11 @@ export const mergePerformanceScriptsWithBackup = (
           ...existing,
           jmxContent: existing.jmxContent || bs.jmxContent || '',
           csvData: existing.csvData || bs.csvData || '',
-          analysisReport: existing.analysisReport || bs.analysisReport,
+          // A Firestore-pruned report is truthy but its JSON has been corrupted.
+          // Prefer the complete copy from local/server backup when available.
+          analysisReport: isFirestoreTrimmed(existing.analysisReport) && !isFirestoreTrimmed(bs.analysisReport)
+            ? bs.analysisReport
+            : (existing.analysisReport || bs.analysisReport),
           trendData: existing.trendData || bs.trendData,
           scenarios: (existing.scenarios && existing.scenarios.length > 0) ? existing.scenarios : (bs.scenarios || [])
         });
@@ -1687,9 +1711,58 @@ export const mergeProjectWithBackupData = (
     backup.uiTestingInputs || []
   );
 
+  // Project updates are commonly produced by feature pages from a project
+  // object captured before another page saved. Preserve backup-only records
+  // for the remaining repositories too, while allowing the incoming record
+  // to win when both copies contain the same id. Explicitly deleted ids are
+  // excluded so this recovery path cannot undo a user deletion.
+  const mergeRecords = <T extends { id?: string }>(current: T[] = [], saved: T[] = []): T[] => {
+    const records = new Map<string, T>();
+    (saved || []).forEach(record => {
+      if (record?.id && !deletedIds.has(record.id)) records.set(record.id, record);
+    });
+    (current || []).forEach(record => {
+      if (record?.id && !deletedIds.has(record.id)) records.set(record.id, {
+        ...(records.get(record.id) as any || {}),
+        ...record
+      });
+    });
+    return Array.from(records.values());
+  };
+
+  const mergedApiWorkspaces = mergeRecords(project.apiWorkspaces || [], backup.apiWorkspaces || []).map(workspace => {
+    const savedWorkspace = (backup.apiWorkspaces || []).find(item => item.id === workspace.id);
+    const currentWorkspace = (project.apiWorkspaces || []).find(item => item.id === workspace.id);
+    const savedCollections = savedWorkspace?.collections || [];
+    const currentCollections = currentWorkspace?.collections || [];
+    const collections = mergeRecords(currentCollections, savedCollections).map(collection => {
+      const savedCollection = savedCollections.find(item => item.id === collection.id);
+      const currentCollection = currentCollections.find(item => item.id === collection.id);
+      return {
+        ...collection,
+        requests: mergeRecords(currentCollection?.requests || [], savedCollection?.requests || []),
+        folders: mergeRecords(currentCollection?.folders || [], savedCollection?.folders || []).map(folder => {
+          const savedFolder = savedCollection?.folders?.find(item => item.id === folder.id);
+          const currentFolder = currentCollection?.folders?.find(item => item.id === folder.id);
+          return { ...folder, requests: mergeRecords(currentFolder?.requests || [], savedFolder?.requests || []) };
+        })
+      };
+    });
+    return {
+      ...workspace,
+      requests: mergeRecords(currentWorkspace?.requests || [], savedWorkspace?.requests || []),
+      collections
+    };
+  });
+
   return syncFolderReferences({
     ...project,
     scenarios: mergedScenarios,
+    manualTestCases: mergeRecords(project.manualTestCases || [], backup.manualTestCases || []),
+    apiHistory: mergeRecords(project.apiHistory || [], backup.apiHistory || []),
+    apiWorkspaces: mergedApiWorkspaces,
+    apiTestSuites: mergeRecords(project.apiTestSuites || [], backup.apiTestSuites || []),
+    apiScenarios: mergeScenariosWithBackup(project.id, project.apiScenarios || [], backup.apiScenarios || [], deletedIds),
     automationScripts: mergedScripts,
     recordedFlows: mergedRecordedFlows,
     uploadVideoFlows: mergedUploadFlows,
@@ -1701,9 +1774,13 @@ export const mergeProjectWithBackupData = (
     figmaDesignReviews: mergedFigmaReviews,
     uiComparisonReports: mergedUIComparisons,
     uiTestingInputs: mergedUIInputs,
-    deletedItemIds: backup.deletedItemIdsVersion === 2 && Array.isArray(backup.deletedItemIds)
-      ? backup.deletedItemIds
-      : (project.deletedItemIdsVersion === 2 && Array.isArray(project.deletedItemIds) ? project.deletedItemIds : []),
+    // Keep tombstones monotonic across stale feature snapshots. Replacing this
+    // list with an older copy lets deleted items reappear and can hide live folders.
+    deletedItemIds: Array.from(new Set([
+      ...(Array.isArray(project.deletedItemIds) ? project.deletedItemIds : []),
+      ...(Array.isArray(backup.deletedItemIds) ? backup.deletedItemIds : []),
+      ...Array.from(deletedIds)
+    ].filter((id): id is string => typeof id === 'string' && Boolean(id.trim())))),
     deletedItemIdsVersion: 2
   }) as Project;
 };

@@ -3833,9 +3833,14 @@ ${bodyHtml}
 
     for (const rawLine of reportLines) {
       const line = rawLine.trim();
-      if (!line.startsWith('|') || !line.endsWith('|') || line.includes('---')) continue;
+      // Markdown tables commonly omit the optional trailing pipe. Accept both
+      // forms; otherwise the final defect row can disappear from annotations.
+      if (!line.startsWith('|') || line.includes('---')) continue;
 
-      const cols = line.split('|').map(c => c.trim()).filter((_, idx, arr) => idx > 0 && idx < arr.length - 1);
+      const cols = line
+        .split('|')
+        .slice(1, line.endsWith('|') ? -1 : undefined)
+        .map(c => c.trim());
       if (cols.length < 3) continue;
 
       // Skip header rows
@@ -6552,6 +6557,18 @@ ${activeVideoFrames.map((f, i) => `#### Frame ${i + 1} (@ Timestamp ${f.timestam
         });
       }
 
+      // Keep the human-readable report total tied to the exact defect records
+      // rendered as numbered annotations. The model's prose count can drift
+      // from its own defect table.
+      let reportFrameIndex = 0;
+      const consistentReport = response.replace(
+        /(^\s*[-*]\s*\*\*Total Defects Detected(?: on this Frame)?\*\*\s*:\s*)\d+/gim,
+        (line, prefix: string) => {
+          const frame = generatedFigmaOutputs[reportFrameIndex++];
+          return frame ? `${prefix}${frame.visualDefectsCount}` : line;
+        }
+      );
+      setFigmaReviewReport(consistentReport);
       setFigmaContrastOutputs(generatedFigmaOutputs);
       setFigmaHighlightedScreenshots(generatedFigmaOutputs.map(o => o.visualDefectsImage));
       setFigmaVisualDefectsScreenshots(generatedFigmaOutputs.map(o => o.visualDefectsImage));

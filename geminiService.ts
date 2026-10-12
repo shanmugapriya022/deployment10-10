@@ -460,7 +460,12 @@ async function clientProxy(functionName: string, args: any[]): Promise<any> {
       functionName === 'correctUIIssues' ||
       functionName === 'correctUIComparisonDiscrepancies'
     );
+    // The initial request only creates/attaches to a durable server job. Keep
+    // that HTTP timeout bounded, but allow long-running AI jobs enough time to
+    // finish through status polling (documents and multimodal inputs can take
+    // several minutes under model or rate-limit load).
     const timeoutDuration = isHeavyTask ? 180000 : 120000;
+    const jobPollTimeoutMs = 15 * 60 * 1000;
     const maxAttempts = 2;
     let lastError: any = null;
 
@@ -552,10 +557,12 @@ async function clientProxy(functionName: string, args: any[]): Promise<any> {
         if (data.jobId && (data.status === 'QUEUED' || data.status === 'PROCESSING')) {
           console.log(`[AI Job Queue] Job ${data.jobId} enqueued. Polling status...`);
           const pollStart = Date.now();
-          while (Date.now() - pollStart < timeoutDuration) {
+          while (Date.now() - pollStart < jobPollTimeoutMs) {
             await new Promise((resolve) => setTimeout(resolve, 1500));
             try {
-              const pollRes = await fetch(`/api/ai/jobs/${data.jobId}`);
+              const pollRes = await fetch(`/api/ai/jobs/${data.jobId}`, {
+                signal: AbortSignal.timeout(10000)
+              });
               if (pollRes.ok) {
                 const pollData = await pollRes.json();
                 if (pollData.job?.status === 'COMPLETED') {
@@ -565,6 +572,12 @@ async function clientProxy(functionName: string, args: any[]): Promise<any> {
                   }
                   if (cacheKey) {
                     browserCache.set(cacheKey, { result: jobResult, timestamp: Date.now() });
+                  }
+                  if (pollData.job.logRecord && typeof window !== 'undefined') {
+                    addTokenLog(pollData.job.logRecord);
+                  }
+                  if (pollData.job.plan && typeof window !== 'undefined') {
+                    window.dispatchEvent(new CustomEvent('project-plan-updated', { detail: pollData.job.plan }));
                   }
                   return jobResult;
                 } else if (pollData.job?.status === 'FAILED') {
@@ -615,6 +628,7 @@ async function clientProxy(functionName: string, args: any[]): Promise<any> {
  */
 const PRIMARY_MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 const FALLBACK_MODEL = process.env.FALLBACK_MODEL_1 || 'gemini-3.1-flash-lite';
+const MODEL_CALL_TIMEOUT_MS = Math.max(30000, Number(process.env.GEMINI_MODEL_CALL_TIMEOUT_MS) || 180000);
 
 const withRetry = async (fn: (modelName: string) => Promise<any>, maxRetries = 2): Promise<any> => {
   let selectedModel = PRIMARY_MODEL;
@@ -622,11 +636,34 @@ const withRetry = async (fn: (modelName: string) => Promise<any>, maxRetries = 2
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      return await fn(selectedModel);
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          fn(selectedModel),
+          new Promise<never>((_, reject) => {
+            timeoutId = setTimeout(() => {
+              const timeoutError: any = new Error(`Gemini model request exceeded ${Math.round(MODEL_CALL_TIMEOUT_MS / 1000)} seconds`);
+              timeoutError.code = 'GEMINI_MODEL_TIMEOUT';
+              reject(timeoutError);
+            }, MODEL_CALL_TIMEOUT_MS);
+          })
+        ]);
+      } finally {
+        if (timeoutId) clearTimeout(timeoutId);
+      }
     } catch (error: any) {
       lastError = error;
       const rawMsg = typeof error === 'string' ? error : (error?.message || String(error));
       const status = error?.status || error?.code;
+
+      // Retry one timed-out request on the fallback model, then fail clearly.
+      if (error?.code === 'GEMINI_MODEL_TIMEOUT') {
+        if (FALLBACK_MODEL && FALLBACK_MODEL !== selectedModel) {
+          selectedModel = FALLBACK_MODEL;
+          continue;
+        }
+        throw error;
+      }
 
       const isAuthOrLeaked = 
         rawMsg.includes('leaked') || 

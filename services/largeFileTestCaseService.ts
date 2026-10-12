@@ -56,7 +56,8 @@ export interface ParentTestCaseJob {
   userId: string;
   fileId: string;
   fileName: string;
-  feature: "AI_TEST_CASES";
+  feature: "AI_TEST_CASES" | "AI_SCENARIOS";
+  creditFeatureName?: string;
   status: "QUEUED" | "PROCESSING" | "COMPLETED" | "FAILED";
   totalChunks: number;
   completedChunks: number;
@@ -481,9 +482,10 @@ export async function createTestCaseJobRecord(
     fileName: string;
     chunks: DocumentChunk[];
     idempotencyKey?: string;
+    creditFeatureName?: string;
   }
 ): Promise<ParentTestCaseJob> {
-  const { projectId, userId, fileId, fileName, chunks, idempotencyKey } = jobParams;
+  const { projectId, userId, fileId, fileName, chunks, idempotencyKey, creditFeatureName } = jobParams;
   const key = idempotencyKey || `job_${projectId}_${fileId}_${crypto.createHash("md5").update(fileName).digest("hex")}`;
   const jobId = `job_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
   const now = new Date().toISOString();
@@ -494,7 +496,8 @@ export async function createTestCaseJobRecord(
     userId,
     fileId,
     fileName,
-    feature: "AI_TEST_CASES",
+    feature: creditFeatureName === 'AI Test Scenario generation' ? 'AI_SCENARIOS' : 'AI_TEST_CASES',
+    creditFeatureName: creditFeatureName || 'AI Test Cases generation',
     status: "QUEUED",
     totalChunks: chunks.length,
     completedChunks: 0,

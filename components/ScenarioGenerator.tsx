@@ -42,7 +42,7 @@ import {
   Paperclip
 } from 'lucide-react';
 import { generateScenariosFromInput, normalizeAndDeduplicateScenarios } from '../geminiService';
-import { recordFeatureConsumption, checkAiGenerationPermission, getProjectCreditSummary } from '../services/tokenConsumptionService';
+import { getProjectCreditSummary } from '../services/tokenConsumptionService';
 import { generateUniqueFolderId } from '../utils/idGenerator';
 import { deductExportCredits, canPerformAction, deductProjectCredits } from '../services/creditService';
 import { downloadExcel, downloadCsv } from '../utils/exportUtils';
@@ -126,6 +126,13 @@ interface LastInputDetails {
   
   const [aiInstructions, setAiInstructions] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [scenarioCreditPermission, setScenarioCreditPermission] = useState<{
+    loading: boolean;
+    allowed: boolean;
+    remainingCredits: number | null;
+    requiredCredits: number;
+    reason?: string;
+  }>({ loading: true, allowed: true, remainingCredits: null, requiredCredits: 10 });
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
   const [selectedScenarioIds, setSelectedScenarioIds] = useState<Set<string>>(new Set());
@@ -216,6 +223,37 @@ interface LastInputDetails {
 
   const docUploadRef = useRef<HTMLInputElement>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
+
+  // Use the same server-backed project permission check as generation. The
+  // local credit log cache can lag behind a renewed/refreshed project plan.
+  useEffect(() => {
+    let isCurrent = true;
+    setScenarioCreditPermission(previous => ({ ...previous, loading: true }));
+    canPerformAction(project.id, 'generateScenariosFromInput', 'analysis', project.name)
+      .then(permission => {
+        if (!isCurrent) return;
+        setScenarioCreditPermission({
+          loading: false,
+          allowed: permission.allowed,
+          remainingCredits: permission.remainingCredits,
+          requiredCredits: permission.cost || 10,
+          reason: permission.reason
+        });
+      })
+      .catch(error => {
+        if (!isCurrent) return;
+        console.warn('AI Scenario credit status check failed:', error);
+        const summary = getProjectCreditSummary(project.id, project.name);
+        setScenarioCreditPermission({
+          loading: false,
+          allowed: !summary.isGated && !summary.isExpired && summary.remainingCredits >= 10,
+          remainingCredits: summary.remainingCredits,
+          requiredCredits: 10,
+          reason: undefined
+        });
+      });
+    return () => { isCurrent = false; };
+  }, [project.id, project.name]);
 
   const scenarios = useMemo(() => (project.scenarios || []).filter(s => !isApiTestingScenario(s)), [project.scenarios]);
 
@@ -788,28 +826,27 @@ interface LastInputDetails {
     if (isGenerating) return;
 
     // 1. GATEKEEPER: Check credit permissions BEFORE starting generation
-    const projectSummary = getProjectCreditSummary(project.id, project.name);
-    const localPerm = checkAiGenerationPermission(user?.email, 'generateScenariosFromInput', project.id, project.name);
-    let permCheck: any = { allowed: true, cost: 10 };
-    
+    let permCheck: any;
     try {
       permCheck = await canPerformAction(project.id, 'generateScenariosFromInput', 'analysis', project.name);
     } catch (creditErr) {
-      console.warn("Credit permission check notice:", creditErr);
+      console.error("Credit permission check failed; generation was stopped:", creditErr);
+      toast.error('Unable to verify project credits. Please try again when the connection is restored.');
+      return;
     }
 
     const requiredCredits = permCheck.cost || 10;
-    const isCreditExceeded = (
-      !permCheck.allowed ||
-      !localPerm.allowed ||
-      projectSummary.isGated ||
-      projectSummary.remainingCredits < requiredCredits ||
-      projectSummary.isExpired
-    );
+    setScenarioCreditPermission({
+      loading: false,
+      allowed: Boolean(permCheck.allowed),
+      remainingCredits: permCheck.remainingCredits,
+      requiredCredits,
+      reason: permCheck.reason
+    });
 
-    if (isCreditExceeded) {
+    if (!permCheck.allowed) {
       setIsGenerating(false);
-      const creditMsg = permCheck.reason || localPerm.reason || `Credit limit reached for project "${project.name}" (${projectSummary.usedCredits}/${projectSummary.totalPool} credits used, ${projectSummary.remainingCredits} remaining). Generation of AI Scenarios is unavailable.`;
+      const creditMsg = permCheck.reason || `Project "${project.name}" has ${permCheck.remainingCredits ?? 0} credits remaining; ${requiredCredits} are required to generate scenarios.`;
       toast.error(creditMsg);
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('credit-limit-exceeded', {
@@ -817,7 +854,7 @@ interface LastInputDetails {
             functionName: 'generateScenariosFromInput',
             userEmail: user?.email,
             reason: creditMsg,
-            remainingCredits: projectSummary.remainingCredits ?? 0
+            remainingCredits: permCheck.remainingCredits ?? 0
           }
         }));
       }
@@ -960,6 +997,7 @@ interface LastInputDetails {
             userId: user.email || user.name,
             fileId: uploadedFileId,
             fileName: docFileName,
+            creditFeatureName: 'AI Test Scenario generation',
             loginContext: cleanLoginContext,
             aiInstructions: combinedInstructions
           })
@@ -972,13 +1010,19 @@ interface LastInputDetails {
           setJobProgressStage(startData.stage || 'Analyzing document...');
 
           let pollFailCount = 0;
-          const pollInterval = setInterval(async () => {
+          let pollInterval: ReturnType<typeof setInterval>;
+          let pollTimeout: ReturnType<typeof setTimeout>;
+          const stopPolling = () => {
+            clearInterval(pollInterval);
+            clearTimeout(pollTimeout);
+          };
+          pollInterval = setInterval(async () => {
             try {
               const statusRes = await fetch(`/api/ai/testcases/job-status/${jobId}`);
               if (!statusRes.ok) {
                 pollFailCount++;
                 if (pollFailCount > 6) {
-                  clearInterval(pollInterval);
+                  stopPolling();
                   setIsGenerating(false);
                   setCanResumeJob(true);
                   toast.error("Network issue while checking scenario generation status. Please try again.");
@@ -988,7 +1032,16 @@ interface LastInputDetails {
 
               pollFailCount = 0;
               const statusData = await statusRes.json();
-              if (!statusData.success) return;
+              if (!statusData.success) {
+                pollFailCount++;
+                if (pollFailCount > 6) {
+                  stopPolling();
+                  setIsGenerating(false);
+                  setCanResumeJob(true);
+                  toast.error(statusData.error || 'Unable to read scenario generation status. Please resume or retry.');
+                }
+                return;
+              }
 
               if (statusData.stage) {
                 setJobProgressStage(statusData.stage);
@@ -1000,7 +1053,7 @@ interface LastInputDetails {
               }
 
               if (statusData.status === 'COMPLETED') {
-                clearInterval(pollInterval);
+                stopPolling();
                 setJobProgressPercent(100);
                 setJobProgressStage(screenshots.length > 0
                   ? 'Analyzing attached screenshots with document requirements...'
@@ -1101,24 +1154,33 @@ interface LastInputDetails {
                 }
                 setIsGenerating(false);
               } else if (statusData.status === 'FAILED') {
-                clearInterval(pollInterval);
+                stopPolling();
                 setIsGenerating(false);
                 setCanResumeJob(true);
                 toast.error(statusData.error || 'Generation failed. You can resume unfinished sections.');
+              } else if (statusData.status !== 'QUEUED' && statusData.status !== 'PROCESSING') {
+                pollFailCount++;
+                if (pollFailCount > 6) {
+                  stopPolling();
+                  setIsGenerating(false);
+                  setCanResumeJob(true);
+                  toast.error(`Scenario generation stopped in an unexpected state (${statusData.status || 'unknown'}). Please resume or retry.`);
+                }
               }
             } catch (pollErr) {
               console.warn('Status poll warning:', pollErr);
               pollFailCount++;
               if (pollFailCount > 6) {
-                clearInterval(pollInterval);
+                stopPolling();
                 setIsGenerating(false);
+                setCanResumeJob(true);
                 toast.error('Unable to reach server during scenario generation. Please check your connection.');
               }
             }
           }, 1500);
 
-          setTimeout(() => {
-            clearInterval(pollInterval);
+          pollTimeout = setTimeout(() => {
+            stopPolling();
             setIsGenerating(false);
             setCanResumeJob(true);
             toast.error('Scenario generation timed out after 15 minutes.');
@@ -3471,7 +3533,7 @@ interface LastInputDetails {
           )}
 
           {/* Credit Limit Exceeded Warning Banner */}
-          {(getProjectCreditSummary(project.id, project.name).remainingCredits <= 0 || getProjectCreditSummary(project.id, project.name).isGated) && (
+          {!scenarioCreditPermission.loading && !scenarioCreditPermission.allowed && (
             <div className="mt-6 p-4 bg-amber-50 border border-amber-300 rounded-2xl flex items-center justify-between gap-4 text-amber-900 shadow-sm animate-in fade-in duration-300">
               <div className="flex items-center gap-3">
                 <div className="w-8 h-8 rounded-xl bg-amber-100 border border-amber-200 flex items-center justify-center shrink-0 text-amber-700">
@@ -3482,19 +3544,19 @@ interface LastInputDetails {
                     Credit Limit Exceeded
                   </h4>
                   <p className="text-xs text-amber-800 font-medium mt-0.5">
-                    Credit limit reached for project "{project.name}" (0 remaining credits). Generation of AI Scenarios is unavailable until credits are renewed or upgraded.
+                    {scenarioCreditPermission.reason || `Project "${project.name}" has ${scenarioCreditPermission.remainingCredits ?? 0} credits remaining; ${scenarioCreditPermission.requiredCredits} are required to generate AI scenarios.`}
                   </p>
                 </div>
               </div>
               <span className="shrink-0 px-3 py-1 bg-amber-200/80 text-amber-900 rounded-full text-[10px] font-black uppercase tracking-wider">
-                0 Credits
+                {scenarioCreditPermission.remainingCredits ?? 0} Credits
               </span>
             </div>
           )}
 
           <div className="flex justify-end mt-8">
             <button 
-              disabled={isGenerating || isUploadingFile || getProjectCreditSummary(project.id, project.name).remainingCredits <= 0 || getProjectCreditSummary(project.id, project.name).isGated}
+              disabled={isGenerating || isUploadingFile || scenarioCreditPermission.loading || !scenarioCreditPermission.allowed}
               onClick={handleGenerate}
               className="bg-indigo-600 text-white px-16 py-5 rounded-full font-black text-xs uppercase tracking-widest flex items-center gap-3 shadow-2xl hover:bg-indigo-700 transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
             >

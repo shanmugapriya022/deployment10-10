@@ -3838,40 +3838,115 @@ async function startServer() {
         return res.status(400).json({ success: false, error: 'Project ID and data required' });
       }
 
+      // Merge with the last durable snapshot before replacing it. Feature pages
+      // can submit project objects captured before a folder was created; treating
+      // those snapshots as complete replacements silently erased saved folders.
+      const cleanId = id.replace(/[^a-zA-Z0-9_\-]/g, '_');
+      const filePath = path.join(projectBackupsDir, `${cleanId}.json`);
+      let previousProject = projectBackupsCache.get(id);
+      if (!previousProject && fs.existsSync(filePath)) {
+        try { previousProject = JSON.parse(fs.readFileSync(filePath, 'utf-8')); } catch (_) {}
+      }
+      const deletedSet = new Set<string>([
+        ...(Array.isArray(previousProject?.deletedItemIds) ? previousProject.deletedItemIds : []),
+        ...(Array.isArray(projectData.deletedItemIds) ? projectData.deletedItemIds : [])
+      ].map((value: any) => String(value).trim().toLowerCase()).filter(Boolean));
+      const recordIsDeleted = (item: any): boolean => {
+        if (!item?.id) return true;
+        const itemId = String(item.id).trim().toLowerCase();
+        return deletedSet.has(itemId) || deletedSet.has(`folder-${itemId}`);
+      };
+      const mergeRecords = (previous: any[] = [], incoming: any[] = []): any[] => {
+        const records = new Map<string, any>();
+        (Array.isArray(previous) ? previous : []).forEach(item => {
+          if (item?.id && !recordIsDeleted(item)) records.set(String(item.id), item);
+        });
+        (Array.isArray(incoming) ? incoming : []).forEach(item => {
+          if (!item?.id || recordIsDeleted(item)) return;
+          const key = String(item.id);
+          const previousRecord = records.get(key) || {};
+          const mergedRecord = { ...previousRecord, ...item };
+          ['name', 'title', 'summary', 'folderName', 'description', 'expectedResult', 'expectedResults'].forEach(field => {
+            if ((mergedRecord[field] === '' || mergedRecord[field] == null) && previousRecord[field]) {
+              mergedRecord[field] = previousRecord[field];
+            }
+          });
+          if (Array.isArray(previousRecord.testCases) || Array.isArray(item.testCases)) {
+            mergedRecord.testCases = mergeRecords(previousRecord.testCases, item.testCases);
+          }
+          records.set(key, mergedRecord);
+        });
+        return Array.from(records.values());
+      };
+      const mergedProject: any = { ...(previousProject || {}), ...projectData };
+      const durableArrays = [
+        'scenarios', 'userStories', 'manualTestCases', 'automationFolders', 'automationScripts',
+        'recordedFlows', 'uploadVideoFlows', 'performanceScripts', 'uiTestingFolders',
+        'uiTestingReports', 'uiTestingInputs', 'figmaDesignReviews', 'uiComparisonReports',
+        'apiHistory', 'apiScenarios', 'apiTestSuites'
+      ];
+      durableArrays.forEach(key => {
+        if (Array.isArray(previousProject?.[key]) || Array.isArray(projectData[key])) {
+          mergedProject[key] = mergeRecords(previousProject?.[key], projectData[key]);
+        }
+      });
+      if (Array.isArray(previousProject?.apiWorkspaces) || Array.isArray(projectData.apiWorkspaces)) {
+        mergedProject.apiWorkspaces = mergeRecords(previousProject?.apiWorkspaces, projectData.apiWorkspaces).map((workspace: any) => {
+          const oldWorkspace = (previousProject?.apiWorkspaces || []).find((item: any) => item.id === workspace.id) || {};
+          const newWorkspace = (projectData.apiWorkspaces || []).find((item: any) => item.id === workspace.id) || {};
+          return {
+            ...workspace,
+            requests: mergeRecords(oldWorkspace.requests, newWorkspace.requests),
+            collections: mergeRecords(oldWorkspace.collections, newWorkspace.collections).map((collection: any) => {
+              const oldCollection = (oldWorkspace.collections || []).find((item: any) => item.id === collection.id) || {};
+              const newCollection = (newWorkspace.collections || []).find((item: any) => item.id === collection.id) || {};
+              return {
+                ...collection,
+                requests: mergeRecords(oldCollection.requests, newCollection.requests),
+                folders: mergeRecords(oldCollection.folders, newCollection.folders).map((folder: any) => {
+                  const oldFolder = (oldCollection.folders || []).find((item: any) => item.id === folder.id) || {};
+                  const newFolder = (newCollection.folders || []).find((item: any) => item.id === folder.id) || {};
+                  return { ...folder, requests: mergeRecords(oldFolder.requests, newFolder.requests) };
+                })
+              };
+            })
+          };
+        });
+      }
+      mergedProject.deletedItemIds = Array.from(deletedSet);
+      mergedProject.deletedItemIdsVersion = 2;
+
       // Ensure deleted items are stripped from backup data before saving to disk
-      if (Array.isArray(projectData.deletedItemIds) && projectData.deletedItemIds.length > 0) {
-        const deletedSet = new Set(projectData.deletedItemIds.map((d: any) => String(d).trim().toLowerCase()));
-        if (Array.isArray(projectData.uiTestingFolders)) {
-          projectData.uiTestingFolders = projectData.uiTestingFolders.filter((f: any) => !deletedSet.has(f.id) && !deletedSet.has(f.id?.toLowerCase()));
+      if (deletedSet.size > 0) {
+        if (Array.isArray(mergedProject.uiTestingFolders)) {
+          mergedProject.uiTestingFolders = mergedProject.uiTestingFolders.filter((f: any) => !deletedSet.has(String(f.id).toLowerCase()) && !deletedSet.has(`folder-${String(f.id).toLowerCase()}`));
         }
-        if (Array.isArray(projectData.uiTestingReports)) {
-          projectData.uiTestingReports = projectData.uiTestingReports.filter((r: any) => !deletedSet.has(r.id) && !deletedSet.has(r.folderId));
+        if (Array.isArray(mergedProject.uiTestingReports)) {
+          mergedProject.uiTestingReports = mergedProject.uiTestingReports.filter((r: any) => !deletedSet.has(String(r.id).toLowerCase()) && !deletedSet.has(String(r.folderId || '').toLowerCase()));
         }
-        if (Array.isArray(projectData.uiTestingInputs)) {
-          projectData.uiTestingInputs = projectData.uiTestingInputs.filter((i: any) => !deletedSet.has(i.id) && !deletedSet.has(i.folderId));
+        if (Array.isArray(mergedProject.uiTestingInputs)) {
+          mergedProject.uiTestingInputs = mergedProject.uiTestingInputs.filter((i: any) => !deletedSet.has(String(i.id).toLowerCase()) && !deletedSet.has(String(i.folderId || '').toLowerCase()));
         }
-        if (Array.isArray(projectData.figmaDesignReviews)) {
-          projectData.figmaDesignReviews = projectData.figmaDesignReviews.filter((f: any) => !deletedSet.has(f.id) && !deletedSet.has(f.folderId));
+        if (Array.isArray(mergedProject.figmaDesignReviews)) {
+          mergedProject.figmaDesignReviews = mergedProject.figmaDesignReviews.filter((f: any) => !deletedSet.has(String(f.id).toLowerCase()) && !deletedSet.has(String(f.folderId || '').toLowerCase()));
         }
-        if (Array.isArray(projectData.uiComparisonReports)) {
-          projectData.uiComparisonReports = projectData.uiComparisonReports.filter((c: any) => !deletedSet.has(c.id) && !deletedSet.has(c.folderId));
+        if (Array.isArray(mergedProject.uiComparisonReports)) {
+          mergedProject.uiComparisonReports = mergedProject.uiComparisonReports.filter((c: any) => !deletedSet.has(String(c.id).toLowerCase()) && !deletedSet.has(String(c.folderId || '').toLowerCase()));
         }
-        if (Array.isArray(projectData.automationFolders)) {
-          projectData.automationFolders = projectData.automationFolders.filter((f: any) => !deletedSet.has(f.id) && !deletedSet.has(f.id?.toLowerCase()));
+        if (Array.isArray(mergedProject.automationFolders)) {
+          mergedProject.automationFolders = mergedProject.automationFolders.filter((f: any) => !deletedSet.has(String(f.id).toLowerCase()) && !deletedSet.has(`folder-${String(f.id).toLowerCase()}`));
         }
-        if (Array.isArray(projectData.userStories)) {
-          projectData.userStories = projectData.userStories.filter((s: any) => !deletedSet.has(s.id) && !deletedSet.has(s.folderId));
+        if (Array.isArray(mergedProject.userStories)) {
+          mergedProject.userStories = mergedProject.userStories.filter((s: any) => !deletedSet.has(String(s.id).toLowerCase()) && !deletedSet.has(String(s.folderId || '').toLowerCase()));
         }
-        if (Array.isArray(projectData.scenarios)) {
-          projectData.scenarios = projectData.scenarios.filter((s: any) => !deletedSet.has(s.id));
+        if (Array.isArray(mergedProject.scenarios)) {
+          mergedProject.scenarios = mergedProject.scenarios.filter((s: any) => !deletedSet.has(String(s.id).toLowerCase()) && !deletedSet.has(`folder-${String(s.id).toLowerCase()}`));
         }
       }
 
-      projectBackupsCache.set(id, projectData);
+      projectBackupsCache.set(id, mergedProject);
 
-      const cleanId = id.replace(/[^a-zA-Z0-9_\-]/g, '_');
-      const filePath = path.join(projectBackupsDir, `${cleanId}.json`);
-      fs.writeFileSync(filePath, JSON.stringify(projectData, null, 2), 'utf-8');
+      fs.writeFileSync(filePath, JSON.stringify(mergedProject, null, 2), 'utf-8');
 
       // Also keep projects.json in sync if exists
       try {
@@ -3882,7 +3957,7 @@ async function startServer() {
           if (Array.isArray(pList)) {
             const idx = pList.findIndex((p: any) => p.id === id);
             if (idx !== -1) {
-              pList[idx] = { ...pList[idx], ...projectData };
+              pList[idx] = { ...pList[idx], ...mergedProject };
               fs.writeFileSync(projectsJsonPath, JSON.stringify(pList, null, 2), 'utf-8');
             }
           }
@@ -10976,31 +11051,35 @@ function saveProjectPlansServer(plans: ProjectPlanRecord[]): void {
 }
 
 async function syncProjectPlanFromFirestore(projectIdOrName: string, fallbackProjectName?: string): Promise<ProjectPlanRecord | null> {
+  const rawProjectId = (projectIdOrName || '').trim();
+  const rawFallbackName = (fallbackProjectName || '').trim();
   const lowerId = (projectIdOrName || '').toLowerCase().trim();
   const lowerFallback = (fallbackProjectName || '').toLowerCase().trim();
   if (!lowerId) return null;
 
   const localPlans = loadProjectPlansServer();
   const existing = localPlans.find(p => (p.projectId && p.projectId.toLowerCase() === lowerId) || (lowerFallback && p.projectName && p.projectName.toLowerCase() === lowerFallback));
-  if (existing) {
-    return existing;
-  }
 
   let firestorePlan: ProjectPlanRecord | null = null;
   try {
     // A. Use Admin SDK if available
     if (adminDb && Date.now() > adminDbQuotaExhaustedUntil) {
       try {
-        let docSnap = await adminDb.collection('project_plans').doc(lowerId).get();
+        let docSnap = await adminDb.collection('project_plans').doc(rawProjectId).get();
         if (docSnap.exists) {
           firestorePlan = docSnap.data() as ProjectPlanRecord;
         }
 
         if (!firestorePlan && lowerFallback) {
-          docSnap = await adminDb.collection('project_plans').doc(lowerFallback).get();
+          docSnap = await adminDb.collection('project_plans').doc(rawFallbackName).get();
           if (docSnap.exists) {
             firestorePlan = docSnap.data() as ProjectPlanRecord;
           }
+        }
+
+        if (!firestorePlan && rawProjectId !== lowerId) {
+          docSnap = await adminDb.collection('project_plans').doc(lowerId).get();
+          if (docSnap.exists) firestorePlan = docSnap.data() as ProjectPlanRecord;
         }
 
         if (!firestorePlan) {
@@ -11054,16 +11133,21 @@ async function syncProjectPlanFromFirestore(projectIdOrName: string, fallbackPro
       const where = (await import('firebase/firestore')).where;
       const limit = (await import('firebase/firestore')).limit;
 
-      let docSnap = await getDoc(doc(db, 'project_plans', lowerId)).catch(() => null);
+      let docSnap = await getDoc(doc(db, 'project_plans', rawProjectId)).catch(() => null);
       if (docSnap && docSnap.exists()) {
         firestorePlan = docSnap.data() as ProjectPlanRecord;
       }
 
       if (!firestorePlan && lowerFallback) {
-        docSnap = await getDoc(doc(db, 'project_plans', lowerFallback)).catch(() => null);
+        docSnap = await getDoc(doc(db, 'project_plans', rawFallbackName)).catch(() => null);
         if (docSnap && docSnap.exists()) {
           firestorePlan = docSnap.data() as ProjectPlanRecord;
         }
+      }
+
+      if (!firestorePlan && rawProjectId !== lowerId) {
+        docSnap = await getDoc(doc(db, 'project_plans', lowerId)).catch(() => null);
+        if (docSnap && docSnap.exists()) firestorePlan = docSnap.data() as ProjectPlanRecord;
       }
 
       if (!firestorePlan) {
@@ -11128,13 +11212,15 @@ async function syncProjectPlanFromFirestore(projectIdOrName: string, fallbackPro
         mergedPlan.remainingCredits = firestorePlan.allocatedCredits || mergedPlan.allocatedCredits;
       }
       localPlans[idx] = mergedPlan;
+      saveProjectPlansServer(localPlans);
+      return mergedPlan;
     } else {
       localPlans.push(firestorePlan);
     }
     saveProjectPlansServer(localPlans);
     return firestorePlan;
   }
-  return null;
+  return existing || null;
 }
 
 function getOrInitProjectPlanServer(projectIdOrName: string, fallbackProjectName?: string, clientPlanHint?: string): ProjectPlanRecord {
@@ -11955,10 +12041,9 @@ async function recordTokenLogServer(params: {
     try {
       const { projectId, projectName, featureKey, featureName, actionType, planType } = req.body;
       const target = projectId || projectName || '27/07';
-      await Promise.race([
-        syncProjectPlanFromFirestore(target, projectName),
-        new Promise(resolve => setTimeout(resolve, 500))
-      ]).catch(() => {});
+      await syncProjectPlanFromFirestore(target, projectName).catch(syncErr => {
+        console.warn('[credits/check-permission] Firestore plan refresh notice:', syncErr?.message || syncErr);
+      });
       const effectiveFeature = featureKey || featureName;
       const check = checkProjectCreditsServer(target, effectiveFeature, actionType || 'analysis', projectName, planType);
       if (!check.allowed) {
@@ -12462,10 +12547,9 @@ async function recordTokenLogServer(params: {
       const projectTarget = userContext?.projectId || userContext?.project || '27/07';
       const clientPlanHint = userContext?.planType || userContext?.clientPlanHint;
 
-      await Promise.race([
-        syncProjectPlanFromFirestore(projectTarget, userContext?.project),
-        new Promise(resolve => setTimeout(resolve, 1500))
-      ]).catch(() => {});
+      await syncProjectPlanFromFirestore(projectTarget, userContext?.project).catch(syncErr => {
+        console.warn('[gemini/call] Firestore plan refresh notice:', syncErr?.message || syncErr);
+      });
 
       // GATEKEEPER: Check project credit permission before executing AI generation
       const creditCheck = checkProjectCreditsServer(projectTarget, featureName, 'AI_ANALYSIS', userContext?.project, clientPlanHint);
@@ -12563,7 +12647,7 @@ async function recordTokenLogServer(params: {
         const jsonArgs = JSON.stringify({ functionName, args: args || [] });
         effectiveKey = crypto.createHash('sha256').update(jsonArgs).digest('hex');
       }
-      const job = await aiJobManager.createOrAttachJob({
+      const jobRecord = await aiJobManager.createOrAttachJob({
         idempotencyKey: effectiveKey,
         taskType: functionName,
         featureName,
@@ -12571,8 +12655,9 @@ async function recordTokenLogServer(params: {
         userEmail: userContext?.email || 'unknown',
         requestPayload: { functionName, args, userContext }
       });
+      const job = jobRecord.job;
 
-      if (job.status === 'COMPLETED' && job.result) {
+      if (job.status === 'COMPLETED' && job.result !== undefined) {
         return res.json({
           success: true,
           jobId: job.id,
@@ -12583,22 +12668,33 @@ async function recordTokenLogServer(params: {
         });
       }
 
+      // Attach to active work instead of starting the same idempotent job twice.
+      if (jobRecord.isExisting && (job.status === 'QUEUED' || job.status === 'PROCESSING')) {
+        return res.status(202).json({ success: true, jobId: job.id, status: job.status });
+      }
+
       let logRecord: any = null;
       let planState: any = null;
       let usageMeta: any = null;
 
-      const jobOutput = await aiJobManager.executeJob(
-        job.id,
-        async () => {
-          const startTime = Date.now();
-          const executionResult = await centralRateController.executeWithRateLimit(async () => {
-            return await func(...(args || []));
-          });
-          executionTimeMs = Date.now() - startTime;
-          await aiCacheService.set(functionName, args || [], executionResult, executionTimeMs);
-          return executionResult;
-        },
-        async (completedResult) => {
+      // Run model work outside the HTTP request lifecycle. AI jobs can take
+      // several minutes with documents or visual inputs; returning their job
+      // id immediately prevents browser, proxy, and hosting timeouts across
+      // every feature that uses this shared endpoint.
+      void (async () => {
+        try {
+          await aiJobManager.executeJob(
+            job.id,
+            async () => {
+              const startTime = Date.now();
+              const executionResult = await centralRateController.executeWithRateLimit(async () => {
+                return await func(...(args || []));
+              });
+              executionTimeMs = Date.now() - startTime;
+              await aiCacheService.set(functionName, args || [], executionResult, executionTimeMs);
+              return executionResult;
+            },
+            async (completedResult) => {
           // Token and Credit deduction strictly triggered once on completion
           usageMeta = (geminiService as any).getLastUsageMetadata ? (geminiService as any).getLastUsageMetadata() : null;
 
@@ -12649,33 +12745,14 @@ async function recordTokenLogServer(params: {
             planState = deductResult.plan;
           }
           return { logRecord, plan: planState };
+            }
+          );
+        } catch (jobError: any) {
+          console.error(`[Server AI] Background job ${job.id} failed for ${functionName}:`, jobError);
         }
-      );
+      })();
 
-      const defaults = getFeatureDefaultTokensServer(featureName);
-      const inputTokens = usageMeta?.promptTokenCount || defaults.input;
-      const outputTokens = usageMeta?.candidatesTokenCount || defaults.output;
-
-      let finalResult = jobOutput;
-      if (jobOutput && typeof jobOutput === 'object' && 'result' in jobOutput && jobOutput.result !== undefined) {
-        finalResult = jobOutput.result;
-      }
-
-      res.json({ 
-        success: true, 
-        jobId: job.id,
-        result: finalResult, 
-        cached: false, 
-        executionTimeMs,
-        tokenUsage: {
-          inputTokens,
-          outputTokens,
-          totalTokens: inputTokens + outputTokens,
-          costUsd: logRecord?.costUsd || 0
-        },
-        logRecord,
-        plan: planState
-      });
+      return res.status(202).json({ success: true, jobId: job.id, status: job.status || 'QUEUED' });
     } catch (error: any) {
       console.error(`[Server AI] Failed to execute Gemini function ${functionName}:`, error);
       const classified = classifyGeminiError(error);
@@ -12956,6 +13033,9 @@ async function recordTokenLogServer(params: {
   app.post(["/api/ai/testcases/start-job", "/api/testcases/start-job"], async (req, res) => {
     try {
       const { projectId, projectName, userId, fileId, fileName, loginContext, aiInstructions, idempotencyKey } = req.body;
+      const creditFeatureName = req.body.creditFeatureName === 'AI Test Scenario generation'
+        ? 'AI Test Scenario generation'
+        : 'AI Test Cases generation';
       if (!fileId) {
         return res.status(400).json({ success: false, error: "fileId is required to start test case generation job." });
       }
@@ -12966,7 +13046,7 @@ async function recordTokenLogServer(params: {
       } catch (syncErr) {
         console.warn("[Server AI] Credit sync notice:", syncErr);
       }
-      const creditCheck = checkProjectCreditsServer(projectId || "default_project", "AI Test Cases generation", "AI_ANALYSIS", projectName);
+      const creditCheck = checkProjectCreditsServer(projectId || "default_project", creditFeatureName, "AI_ANALYSIS", projectName);
       if (!creditCheck.allowed) {
         return res.status(403).json({
           success: false,
@@ -13039,7 +13119,8 @@ async function recordTokenLogServer(params: {
         fileId,
         fileName: cleanFileName,
         chunks,
-        idempotencyKey: activeKey
+        idempotencyKey: activeKey,
+        creditFeatureName
       });
 
       // Launch async processing job through central rate controller
@@ -13050,7 +13131,7 @@ async function recordTokenLogServer(params: {
           try {
             await deductProjectCreditsServer({
               projectIdOrName: projectId || "default_project",
-              featureName: "AI Test Cases generation",
+              featureName: completedJob.creditFeatureName || "AI Test Cases generation",
               actionType: "AI_ANALYSIS",
               userName: userId || "User",
               userEmail: userId || "User",
@@ -13164,7 +13245,7 @@ async function recordTokenLogServer(params: {
             try {
               await deductProjectCreditsServer({
                 projectIdOrName: jobData.projectId || "default_project",
-                featureName: "AI Test Cases generation",
+                featureName: jobData.creditFeatureName || "AI Test Cases generation",
                 actionType: "AI_ANALYSIS",
                 userName: jobData.userId || "User",
                 userEmail: jobData.userId || "User",

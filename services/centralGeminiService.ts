@@ -811,6 +811,13 @@ export class AIJobManager {
         const durationMs = Date.now() - startTime;
         lastError = err;
 
+        // geminiService has already tried the configured models for a timed
+        // out request. Re-running the whole generation job only creates a
+        // second long wait for the UI without helping the timed-out call.
+        if (err?.code === 'GEMINI_MODEL_TIMEOUT') {
+          break;
+        }
+
         const classification = classifyGeminiError(err);
 
         // CASE A: 403 Forbidden / Configuration Error -> NEVER RETRY!

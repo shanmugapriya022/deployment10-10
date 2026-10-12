@@ -1645,22 +1645,25 @@ const App: React.FC = () => {
   const updateProject = async (updatedProject: Project, options?: { immediate?: boolean }): Promise<void> => {
     if (!updatedProject?.id) return;
 
-    // Merge scenario content against the last known durable copy before any
-    // backup or Firestore write. UI updates from stale component props can
-    // otherwise replace a populated array with blank text or no scenarios.
+    // Merge all project repositories against the last durable copy before
+    // any backup or Firestore write. Feature pages can hold an older project
+    // snapshot; writing it wholesale used to erase folders and saved records
+    // created elsewhere in the app.
     const previousBackup = getProjectBackupSync(updatedProject.id);
-    const withDurableScenarios = {
-      ...updatedProject,
-      scenarios: mergeScenariosWithBackup(
-        updatedProject.id,
-        updatedProject.scenarios || [],
-        previousBackup?.scenarios || [],
-        getDeletedIds(updatedProject.id)
-      )
-    } as Project;
+    const currentProject = projects.find(project => project.id === updatedProject.id);
+    const withCurrentData = mergeProjectWithBackupData(
+      updatedProject,
+      currentProject,
+      getDeletedIds(updatedProject.id)
+    );
+    const withDurableData = mergeProjectWithBackupData(
+      withCurrentData,
+      previousBackup,
+      getDeletedIds(updatedProject.id)
+    );
     
     // Ensure all permanently deleted items are stripped
-    const cleanUpdatedProject = cleanProjectDeletedItems(withDurableScenarios);
+    const cleanUpdatedProject = cleanProjectDeletedItems(withDurableData);
 
     // Save multi-tier backup (in-memory, IndexedDB, localStorage, and server backup)
     saveProjectBackup(cleanUpdatedProject);

@@ -69,6 +69,7 @@ import { createWorkbookFromRows, downloadXlsxWorkbook } from '../utils/spreadshe
 import { saveAs } from 'file-saver';
 import { toast } from 'sonner';
 import { Project, User, UserRole } from '../types';
+import { generatePerformanceStepScenarios, generateWebPerformanceAnalysis } from '../geminiService';
 import { addTokenLog } from '../services/tokenConsumptionService';
 import { sanitizeJmxScript } from '../utils/jmxSanitizer';
 import { deductExportCredits, canPerformActionLocal } from '../services/creditService';
@@ -511,22 +512,13 @@ export const PerformanceTestingWorkflow: React.FC<PerformanceTestingWorkflowProp
 
     setIsGeneratingAiWorkflow(true);
     try {
-      const response = await fetch('/api/gemini/call', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          functionName: 'generatePerformanceStepScenarios',
-          args: [
-            target,
-            selectedFunctionality.name,
-            selectedFunctionality.description
-          ]
-        })
-      });
-
-      const data = await response.json();
-      if (data.success && Array.isArray(data.result) && data.result.length > 0) {
-        const generatedSteps: FunctionalityStep[] = data.result.map((sc: any, idx: number) => ({
+      const generated = await generatePerformanceStepScenarios(
+        target,
+        selectedFunctionality.name,
+        selectedFunctionality.description
+      );
+      if (Array.isArray(generated) && generated.length > 0) {
+        const generatedSteps: FunctionalityStep[] = generated.map((sc: any, idx: number) => ({
           id: `st_ai_${idx + 1}_${Date.now().toString(36)}`,
           name: sc.scenarioName || sc.title || `Step ${idx + 1}: ${sc.path || 'Request'}`,
           method: (sc.method || 'GET').toUpperCase() as any,
@@ -539,7 +531,7 @@ export const PerformanceTestingWorkflow: React.FC<PerformanceTestingWorkflowProp
         setActiveSteps(generatedSteps);
         addLog(`AI auto-generated ${generatedSteps.length} HTTP transaction steps for ${selectedFunctionality.name}!`, 'success');
       } else {
-        throw new Error(data.error || 'Could not parse AI scenarios');
+        throw new Error('Could not parse AI scenarios');
       }
     } catch (err: any) {
       // Fallback smart generation based on functionality
@@ -1104,38 +1096,25 @@ export const PerformanceTestingWorkflow: React.FC<PerformanceTestingWorkflowProp
     addLog('Generating AI Performance Recommendations via Gemini 3.8 Flash...', 'info');
 
     try {
-      const aiResponse = await fetch('/api/gemini/call', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          functionName: 'generateWebPerformanceAnalysis',
-          args: [
-            target,
-            `${selectedFunctionality.name} (${selectedTestType})`,
-            {
-              avgLatencyMs: rawReport.avgResponseTimeMs,
-              p95LatencyMs: rawReport.p95ResponseTimeMs,
-              maxRps: rawReport.maxRps,
-              errorRatePercent: rawReport.errorRatePercent,
-              webVitals: rawReport.webVitals,
-              stepCount: activeSteps.length,
-              steps: activeSteps.map(s => `${s.method} ${s.path}`)
-            },
-            {
-              virtualUsers,
-              durationSeconds,
-              targetSlaMs
-            }
-          ]
-        })
-      });
-
-      const aiData = await aiResponse.json();
-      if (aiData.success && aiData.result) {
-        rawReport.aiAnalysis = aiData.result;
+      const aiAnalysis = await generateWebPerformanceAnalysis(
+        target,
+        `${selectedFunctionality.name} (${selectedTestType})`,
+        {
+          avgLatencyMs: rawReport.avgResponseTimeMs,
+          p95LatencyMs: rawReport.p95ResponseTimeMs,
+          maxRps: rawReport.maxRps,
+          errorRatePercent: rawReport.errorRatePercent,
+          webVitals: rawReport.webVitals,
+          stepCount: activeSteps.length,
+          steps: activeSteps.map(s => `${s.method} ${s.path}`)
+        },
+        { virtualUsers, durationSeconds, targetSlaMs }
+      );
+      if (aiAnalysis) {
+        rawReport.aiAnalysis = aiAnalysis;
         addLog('Successfully generated AI Performance Analysis & Optimization Roadmap!', 'success');
       } else {
-        throw new Error(aiData.error || 'Failed to analyze metrics');
+        throw new Error('Failed to analyze metrics');
       }
     } catch (aiErr: any) {
       addLog(`AI Analysis warning: ${aiErr.message || 'Fallback to rule-based diagnostics'}.`, 'warn');

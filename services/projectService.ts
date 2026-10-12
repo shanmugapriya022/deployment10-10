@@ -27,7 +27,7 @@ import {
   deleteStoryFromFirestore,
   renameFolderInFirestore
 } from "./folderPersistenceService";
-import { filterDeletedScriptFiles, syncFolderReferences } from "./storageBackupService";
+import { filterDeletedScriptFiles, queueProjectBackupWrite, syncFolderReferences } from "./storageBackupService";
 
 export {
   saveFolderToFirestore,
@@ -551,14 +551,8 @@ export const cleanProjectDeletedItems = (project: any): any => {
       if (!f || !f.id) return false;
       if (deleted.has(f.id) || deleted.has(`folder-${f.id}`)) return false;
       if (seenFolderIds.has(f.id)) return false;
-      // Do not retain empty script_generator folders with 0 scripts that were created via test-case approvals
-      if (f.type === 'script_generator' && !(f as any).isUserCreatedScriptFolder) {
-        const fName = (f.name || '').trim().toLowerCase();
-        const hasScripts = Array.isArray(cleaned.automationScripts) && cleaned.automationScripts.some(
-          (s: any) => (s.folderName || '').trim().toLowerCase() === fName || s.folderId === f.id
-        );
-        if (!hasScripts) return false;
-      }
+      // Empty folders are valid saved data (for example, test case folders
+      // created before scripts are generated). Only a tombstone deletes them.
       seenFolderIds.add(f.id);
       return true;
     });
@@ -909,13 +903,16 @@ export const pruneProjectData = (project: any): any => {
   }
 
   // 4. SANITIZE PERFORMANCE SCRIPTS UNCONDITIONALLY:
-  // Full raw JMX XML and CSV are safely stored in localStorage ('automatiqa_perf_scripts_<id>') and server disk.
+  // Full raw JMX XML, CSV, and analysis reports are safely stored in localStorage ('automatiqa_perf_scripts_<id>') and server disk.
   // Firestore document should strictly hold execution metadata to prevent 1MB overflow.
   if (cloned.performanceScripts && Array.isArray(cloned.performanceScripts)) {
     if (cloned.performanceScripts.length > 10) {
       cloned.performanceScripts = cloned.performanceScripts.slice(0, 10);
     }
     cloned.performanceScripts.forEach((s: any) => {
+      // Keep report bodies in the full local/server backup. Truncating their JSON here
+      // makes archived reports impossible for the viewer to parse.
+      s.analysisReport = undefined;
       s.trendData = undefined;
       if (typeof s.jmxContent === 'string' && s.jmxContent.length > 1500) {
         s.jmxStorageRef = 'local';
@@ -968,6 +965,7 @@ export const pruneProjectData = (project: any): any => {
       cloned.performanceScripts = cloned.performanceScripts.slice(0, 15);
     }
     cloned.performanceScripts.forEach((s: any) => {
+      s.analysisReport = undefined;
       s.trendData = undefined;
       // Never corrupt XML with broken truncation strings. If script is large, Firestore holds metadata while full JMX is in localStorage & server disk
       if (typeof s.jmxContent === 'string' && s.jmxContent.length > 3000) {
@@ -1371,6 +1369,7 @@ export const pruneProjectDataUltra = (project: any): any => {
       s.jmxStorageRef = 'local';
       s.jmxContent = ''; // Preserved in local storage & disk
       s.csvData = '';
+      s.analysisReport = undefined;
       s.trendData = undefined;
     });
   }
@@ -1516,7 +1515,11 @@ export const saveScenariosToFirestore = async (
     if (!scenario?.id || deleted.has(String(scenario.id).trim().toLowerCase())) return;
 
     const scenarioDocId = encodeURIComponent(String(scenario.id));
-    const { testCases = [], ...scenarioData } = scenario as TestScenario & { testCases?: TestCase[] };
+    const { testCases = [], ...scenarioData } = scenario as TestScenario & {
+      testCases?: TestCase[];
+      scenarioDescription?: string;
+      expectedResult?: string;
+    };
     const existing = existingById.get(String(scenario.id)) || {};
     const savedMembers = Array.isArray(existing.memberScenarioIds) ? existing.memberScenarioIds : [];
     const incomingMembers = Array.isArray(scenarioData.memberScenarioIds) ? scenarioData.memberScenarioIds : [];
@@ -1633,13 +1636,8 @@ export const updateProjectFirestore = async (projectId: string, data: any, optio
     }
   } catch (e) {}
 
-  if (typeof fetch !== 'undefined') {
-    fetch(`/api/projects/backup/${projectId}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: projectId, ...cleanData })
-    }).catch(err => console.warn('[Backup API] Failed to backup to server disk:', err));
-  }
+  queueProjectBackupWrite({ id: projectId, ...cleanData })
+    .catch(err => console.warn('[Backup API] Failed to backup to server disk:', err));
 
   const performWrite = async (): Promise<void> => {
     try {

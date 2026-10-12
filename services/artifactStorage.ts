@@ -359,8 +359,9 @@ export async function getVideoBlob(videoId: string, fileName?: string): Promise<
 }
 
 /**
- * Stream/upload a video File or Blob to persistent server disk and IndexedDB.
- * Returns the permanent server URL (e.g. /artifacts/video_....mp4) that survives reloads.
+ * Upload a video File or Blob to durable cloud storage and cache it locally.
+ * Prefer the Firebase download URL because server-local artifact files may be
+ * cleared when a hosted app instance is recycled or redeployed.
  */
 export async function uploadAndPersistVideo(
   videoId: string,
@@ -401,7 +402,9 @@ export async function uploadAndPersistVideo(
     }
   }
 
-  // 3. Stream/Upload to Firebase Storage in parallel with a 3s timeout safety net
+  // 3. Persist to Firebase Storage. Do not return the local artifact URL just
+  // because a cloud upload takes longer than a short UI timeout: that URL may
+  // point to ephemeral server disk and stop working after an instance restart.
   try {
     const storagePath = `record_play_videos/${videoId}_${uniqueName}`;
     const storageRef = ref(storage, storagePath);
@@ -419,8 +422,7 @@ export async function uploadAndPersistVideo(
       return '';
     });
 
-    const timeoutPromise = new Promise<string>((r) => setTimeout(() => r(''), 3000));
-    const cloudUrl = await Promise.race([firebasePromise, timeoutPromise]);
+    const cloudUrl = await firebasePromise;
     if (cloudUrl) {
       finalUrl = cloudUrl;
     }
