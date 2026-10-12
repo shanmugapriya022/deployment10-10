@@ -447,7 +447,23 @@ export const deductProjectCreditsLocal = (
   const plan = getProjectPlanSync(projectId, metadata?.projectName);
   const effectivePlanType = metadata?.planType || plan.planType || 'Paid';
   const cost = getCreditCost(featureKeyOrName, actionType, effectivePlanType);
-  const currentUsed = plan.consumedCredits ?? 0;
+  const summary = getProjectCreditSummary(projectId, metadata?.projectName);
+  const currentUsed = Math.max(plan.consumedCredits ?? 0, summary.usedCredits ?? 0);
+  const currentRemaining = Math.max(0, plan.allocatedCredits - currentUsed);
+
+  if (summary.isExpired || currentRemaining < cost) {
+    return {
+      success: false,
+      deducted: 0,
+      remainingCredits: currentRemaining,
+      plan,
+      error: summary.isExpired
+        ? 'The project credit plan has expired. Renew the plan to continue.'
+        : `Insufficient project credits. This action requires ${cost} credits, but only ${currentRemaining} remain.`,
+      code: summary.isExpired ? 'PLAN_EXPIRED' : 'INSUFFICIENT_CREDITS'
+    };
+  }
+
   const newUsed = Math.min(plan.allocatedCredits, currentUsed + cost);
   const newRemaining = Math.max(0, plan.allocatedCredits - newUsed);
 
@@ -559,8 +575,22 @@ export const deductProjectCredits = async (
         logRecord: data.logRecord,
         plan: data.plan
       };
+    } else if (parsed.status > 0 && (
+      parsed.data?.success === false ||
+      ['PLAN_EXPIRED', 'CREDITS_EXHAUSTED', 'INSUFFICIENT_CREDITS', 'PLAN_DISABLED'].includes(parsed.data?.code)
+    )) {
+      // A server business-rule denial is authoritative. Never turn it into a
+      // successful local deduction, which would let generation continue at 0.
+      return {
+        success: false,
+        deducted: 0,
+        remainingCredits: parsed.data?.remainingCredits ?? 0,
+        plan: parsed.data?.plan,
+        error: parsed.data?.error || 'Project credits are insufficient for this action.',
+        code: parsed.data?.code
+      };
     } else {
-      console.warn('[creditService] Server deduct returned non-success, deducting locally:', parsed.error || parsed.data?.error);
+      console.warn('[creditService] Server deduct unavailable, evaluating cached balance:', parsed.error || parsed.data?.error);
       return deductProjectCreditsLocal(projectId, featureKeyOrName, actionType, userDetails, metadata);
     }
   } catch (err: any) {

@@ -31,6 +31,15 @@ function getDB(): Promise<IDBDatabase | null> {
 
   if (!dbPromise) {
     dbPromise = new Promise((resolve) => {
+      let settled = false;
+      const finish = (db: IDBDatabase | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(openTimeout);
+        resolve(db);
+      };
+      // A blocked IndexedDB open must not leave report saves waiting forever.
+      const openTimeout = setTimeout(() => finish(null), 2500);
       try {
         const request = window.indexedDB.open(DB_NAME, DB_VERSION);
 
@@ -42,16 +51,20 @@ function getDB(): Promise<IDBDatabase | null> {
         };
 
         request.onsuccess = (event: any) => {
-          resolve(event.target.result);
+          finish(event.target.result);
         };
 
         request.onerror = (err) => {
           console.warn('[ArtifactStorage] IndexedDB open error, using memory cache:', err);
-          resolve(null);
+          finish(null);
+        };
+        request.onblocked = () => {
+          console.warn('[ArtifactStorage] IndexedDB open blocked, using memory cache for this save.');
+          finish(null);
         };
       } catch (err) {
         console.warn('[ArtifactStorage] IndexedDB init exception, using memory cache:', err);
-        resolve(null);
+        finish(null);
       }
     });
   }
@@ -616,11 +629,14 @@ export async function persistImageArtifact(
   // 2. Upload image payload to server disk via /api/artifacts/save
   let serverUrl = '';
   try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
     const res = await fetch('/api/artifacts/save', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: key, image: dataUrl })
-    });
+      body: JSON.stringify({ id: key, image: dataUrl }),
+      signal: controller.signal
+    }).finally(() => clearTimeout(timeout));
     if (res.ok) {
       const data = await res.json();
       if (data && data.url) {

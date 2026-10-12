@@ -686,7 +686,7 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
   useEffect(() => {
     if (!project?.scenarios || project.scenarios.length === 0) return;
     let hasChanges = false;
-    const deleted = getDeletedIds();
+    const deleted = getDeletedIds(project.id);
 
     const cleaned = project.scenarios.map(s => {
       // 1. Scenarios belonging to a test case folder must be marked isRemovedFromIndividual: true
@@ -723,7 +723,7 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
 
   // Approved scenarios available in AI Test Cases INDIVIDUAL view (all approved non-structural scenarios that do NOT belong to a test case folder)
   const approvedScenarios = useMemo(() => {
-    const deleted = getDeletedIds();
+    const deleted = getDeletedIds(project.id);
     return (project.scenarios || []).filter(s => 
       !isStructuralScenario(s) &&
       Boolean(s.isApproved) &&
@@ -814,7 +814,7 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
           !isStructuralScenario(s) &&
           Boolean(s.isApproved) &&
           !isApiTestingScenario(s) &&
-          !getDeletedIds().has(s.id)
+          !getDeletedIds(project.id).has(s.id)
         )
       : approvedScenarios;
 
@@ -906,7 +906,7 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
           !isStructuralScenario(s) &&
           Boolean(s.isApproved) &&
           !isApiTestingScenario(s) &&
-          !getDeletedIds().has(s.id)
+          !getDeletedIds(project.id).has(s.id)
         )
       : approvedScenarios;
 
@@ -1410,6 +1410,31 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
     });
   };
 
+  const handleCreateScriptGeneratorFolderFromTestCaseFolder = (folder: TestScenario) => {
+    const approvedCases = getFolderCases(folder, project.scenarios || []).filter(testCase => Boolean(testCase.isApproved));
+    if (approvedCases.length === 0) {
+      toast.error('Approve test cases in this folder before creating a Script Generator folder');
+      return;
+    }
+
+    const suggestedName = `${folder.title || 'Test Cases'} Scripts`;
+    const matchingScriptFolder = scriptGeneratorFolders.find(
+      existingFolder => existingFolder.name.trim().toLowerCase() === suggestedName.trim().toLowerCase()
+    );
+    setApproveScriptModal({
+      isOpen: true,
+      targetType: 'folder',
+      folderId: folder.id,
+      testCases: approvedCases,
+      sourceTitle: `Approved cases in: ${folder.title}`,
+      folderMode: matchingScriptFolder ? 'existing' : 'new',
+      selectedFolderId: matchingScriptFolder?.id || '',
+      selectedFolderName: matchingScriptFolder?.name || '',
+      newFolderName: suggestedName,
+      newFolderDescription: `Automation scripts generated from approved test cases in ${folder.title}`
+    });
+  };
+
   // Toggle scenario-level approval for Script Generator
   const handleToggleScenarioApproval = (scenarioId: string) => {
     const targetScenario = (project.scenarios || []).find(s => s.id === scenarioId);
@@ -1828,7 +1853,7 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
     });
 
     // Record all deleted IDs in tombstones
-    addDeletedIds(tombstonesToAdd);
+    addDeletedIds(tombstonesToAdd, project.id);
 
     try {
       localStorage.setItem(`automatiqa_project_backup_${project.id}`, JSON.stringify({ ...project, scenarios: finalScenarios, automationScripts: remainingScripts }));
@@ -2002,7 +2027,7 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
     });
 
     // Record tombstones to permanently prevent resurrection of this folder
-    addDeletedIds(tombstonesToAdd);
+    addDeletedIds(tombstonesToAdd, project.id);
 
     if (project?.id) {
       deleteFolderFromFirestore(project.id, folderId).catch(() => {});
@@ -4265,6 +4290,7 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
               const matchingFolderCases = q ? rawFolderCases.filter(tc => isTestCaseMatching(tc, q)) : rawFolderCases;
               const folderCases = (q && matchingFolderCases.length > 0) ? matchingFolderCases : rawFolderCases;
               const casesCount = folderCases.length;
+              const approvedFolderCasesCount = rawFolderCases.filter(testCase => Boolean(testCase.isApproved)).length;
               const isAllFolderSelected = casesCount > 0 && folderCases.every(tc => selectedCaseIds.has(tc.id));
               const isSomeFolderSelected = folderCases.some(tc => selectedCaseIds.has(tc.id));
 
@@ -4330,6 +4356,16 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
                       <span className="bg-[#E6FFFA] text-[#00B4A0] px-3 py-1 rounded-lg text-[10px] font-black tracking-widest uppercase border border-[#B2F5EA]">
                         FOLDER
                       </span>
+                      {approvedFolderCasesCount > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => handleCreateScriptGeneratorFolderFromTestCaseFolder(folder)}
+                          className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl text-[10px] font-black uppercase tracking-wider transition-colors cursor-pointer"
+                          title={`Create a Script Generator folder from ${approvedFolderCasesCount} approved test case(s)`}
+                        >
+                          <FolderPlus size={14} /> Create Script Folder ({approvedFolderCasesCount})
+                        </button>
+                      )}
 
                       {/* Video Walkthrough Tag Badge */}
                       {Boolean(
@@ -5960,7 +5996,7 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
                     return true;
                   });
 
-                  addDeletedIds(tombstonesToAdd);
+                  addDeletedIds(tombstonesToAdd, project.id);
 
                   const existingIds = new Set(updatedScenarios.map(s => s.id));
                   const finalScenarios = updatedScenarios.map(scen => {

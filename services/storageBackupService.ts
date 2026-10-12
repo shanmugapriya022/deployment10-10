@@ -52,24 +52,8 @@ const openDb = (): Promise<IDBDatabase | null> => {
 // Helper to retrieve all permanently deleted IDs from localStorage and project
 const getGlobalDeletedSet = (project?: any): Set<string> => {
   const set = new Set<string>();
-  try {
-    if (typeof localStorage !== 'undefined') {
-      const raw = localStorage.getItem('automatiqa_deleted_ids');
-      if (raw) {
-        const arr = JSON.parse(raw);
-        if (Array.isArray(arr)) {
-          arr.forEach((id: string) => {
-            if (id) {
-              const str = String(id).trim().toLowerCase();
-              set.add(str);
-              set.add(`folder-${str}`);
-            }
-          });
-        }
-      }
-    }
-  } catch (e) {}
-  if (project && Array.isArray(project.deletedItemIds)) {
+  // A global tombstone list can hide unrelated folders in other projects.
+  if (project && project.deletedItemIdsVersion === 2 && Array.isArray(project.deletedItemIds)) {
     project.deletedItemIds.forEach((id: string) => {
       if (id) {
         const str = String(id).trim().toLowerCase();
@@ -1042,17 +1026,11 @@ export const mergeScenariosWithBackup = (
     expectedResults: getScenarioText(scenario.expectedResults, scenario.expectedResult)
   });
 
-  const isItemDeleted = (id?: string, title?: string, isFolder?: boolean, scenarioId?: string) => {
+  const isItemDeleted = (id?: string, title?: string, isFolder?: boolean) => {
     if (!id) return true;
     const lowerId = id.trim().toLowerCase();
     if (deletedIds.has(id) || deletedIds.has(lowerId) || deletedIds.has(`folder-${id}`) || deletedIds.has(`folder-${lowerId}`)) {
       return true;
-    }
-    if (scenarioId && !['SCENARIO_FOLDER', 'TESTCASE_FOLDER', 'MANUAL_FOLDER', 'INPUT_SOURCE', 'SCRIPT_GENERATOR_FOLDER', 'USERSTORY_FOLDER'].includes(scenarioId)) {
-      const lowerScId = scenarioId.trim().toLowerCase();
-      if (deletedIds.has(scenarioId) || deletedIds.has(lowerScId)) {
-        return true;
-      }
     }
     if (isFolder && title) {
       const lowerTitle = title.trim().toLowerCase();
@@ -1067,7 +1045,7 @@ export const mergeScenariosWithBackup = (
 
   // 1. Index firestore scenarios
   firestoreScenarios.forEach(s => {
-    if (s && s.id && !isItemDeleted(s.id, s.title, s.isFolder || s.scenarioId === 'SCENARIO_FOLDER', s.scenarioId)) {
+    if (s && s.id && !isItemDeleted(s.id, s.title, s.isFolder || s.scenarioId === 'SCENARIO_FOLDER')) {
       scenarioMap.set(s.id, normalizeScenarioContent(s));
     }
   });
@@ -1075,7 +1053,7 @@ export const mergeScenariosWithBackup = (
   // Helper to overlay scenarios from backup sources
   const overlayScenarios = (list: any[]) => {
     list.forEach(bs => {
-      if (!bs || !bs.id || isItemDeleted(bs.id, bs.title, bs.isFolder || bs.scenarioId === 'SCENARIO_FOLDER', bs.scenarioId)) return;
+      if (!bs || !bs.id || isItemDeleted(bs.id, bs.title, bs.isFolder || bs.scenarioId === 'SCENARIO_FOLDER')) return;
 
       bs = normalizeScenarioContent(bs);
       const existing = scenarioMap.get(bs.id);
@@ -1132,8 +1110,8 @@ export const mergeScenariosWithBackup = (
           ...bs,
           ...existing,
           title: (existing.title && existing.title.trim()) ? existing.title : bs.title,
-          description: getScenarioText(existing.description, bs.description),
-          expectedResults: getScenarioText(existing.expectedResults, bs.expectedResults),
+          description: getScenarioText(existing.description, existing.scenarioDescription, bs.description, bs.scenarioDescription),
+          expectedResults: getScenarioText(existing.expectedResults, existing.expectedResult, bs.expectedResults, bs.expectedResult),
           testCases: mergedCases,
           isApproved: resolvedApproved,
           saved: (existing.saved !== undefined ? existing.saved : bs.saved) || Boolean(isFolderItem),
@@ -1722,6 +1700,10 @@ export const mergeProjectWithBackupData = (
     uiTestingReports: mergedUIReports,
     figmaDesignReviews: mergedFigmaReviews,
     uiComparisonReports: mergedUIComparisons,
-    uiTestingInputs: mergedUIInputs
+    uiTestingInputs: mergedUIInputs,
+    deletedItemIds: backup.deletedItemIdsVersion === 2 && Array.isArray(backup.deletedItemIds)
+      ? backup.deletedItemIds
+      : (project.deletedItemIdsVersion === 2 && Array.isArray(project.deletedItemIds) ? project.deletedItemIds : []),
+    deletedItemIdsVersion: 2
   }) as Project;
 };

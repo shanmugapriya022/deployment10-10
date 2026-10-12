@@ -420,25 +420,9 @@ async function clientProxy(functionName: string, args: any[]): Promise<any> {
         clientPlanHint: currentProjPlan?.planType || 'Paid'
       };
 
-      // Verify Basic Plan / Project Plan Credit Limit before proceeding (free features like video upload detection skip this)
-      const isFreeClientFeature = functionName === 'detectVideoWalkthroughActions' || functionName === 'analyzeVideoWalkthroughAndSynthesizeFlow';
-      if (!isFreeClientFeature) {
-        const permission = checkAiGenerationPermission(userContext.email, functionName, userContext.projectId, userContext.project);
-        if (!permission.allowed) {
-          if (typeof window !== 'undefined') {
-            window.dispatchEvent(new CustomEvent('credit-limit-exceeded', {
-              detail: {
-                functionName,
-                userEmail: userContext.email,
-                reason: permission.reason,
-                usedCredits: permission.usedCredits,
-                remainingCredits: permission.remainingCredits
-              }
-            }));
-          }
-          throw new Error(permission.reason || "Basic Plan credit limit reached (1,000 points). All non-AI features continue working normally. Please top up credits to resume AI generation.");
-        }
-      }
+      // The API performs the authoritative project-level credit check. A
+      // browser-side check here can use stale logs and reject a request even
+      // when the server confirms that the selected project has credits left.
     }
 
     const clientRequestId = `req_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
@@ -1272,6 +1256,26 @@ function generateFallbackScenariosForSingleStory(storyText: string, index: numbe
     ? acText.split(/\r?\n/).map(l => l.replace(/^[-*•\d.\s]+/, '').trim()).filter(l => l.length > 5)
     : [];
 
+  const groupedAcLines: string[] = [];
+  let activeGherkinBlock: string[] = [];
+  const flushActiveGherkinBlock = () => {
+    if (activeGherkinBlock.length > 0) {
+      groupedAcLines.push(activeGherkinBlock.join(' '));
+      activeGherkinBlock = [];
+    }
+  };
+  acLines.forEach(line => {
+    const isGherkinLine = /^(?:Given|When|Then|And|But)\b/i.test(line);
+    const startsNewBlock = /^(?:Given|Scenario|Scenario Outline)\b/i.test(line);
+    if (startsNewBlock && activeGherkinBlock.length > 0) flushActiveGherkinBlock();
+    if (isGherkinLine) activeGherkinBlock.push(line);
+    else {
+      flushActiveGherkinBlock();
+      groupedAcLines.push(line);
+    }
+  });
+  flushActiveGherkinBlock();
+
   // Gather keywords from storyText to detect domains
   const combinedText = (storyText + " " + usSum + " " + storyDesc).toLowerCase();
 
@@ -1283,8 +1287,16 @@ function generateFallbackScenariosForSingleStory(storyText: string, index: numbe
   const isMessaging = /chat|message|comment|like|post|notification|email|sms|feed/i.test(combinedText);
 
   // If we have explicit AC lines, we generate scenarios based on AC lines.
-  if (acLines.length > 0) {
-    acLines.forEach((acLine, acIdx) => {
+  if (groupedAcLines.length > 0) {
+    groupedAcLines.forEach((acLine, acIdx) => {
+      const gherkinClauses = Array.from(acLine.matchAll(/\b(Given|When|Then|And|But)\s+(.+?)(?=\s+\b(?:Given|When|Then|And|But)\b|$)/gi))
+        .map(match => ({ keyword: match[1].toLowerCase(), text: match[2].trim().replace(/[.]+$/, '') }))
+        .filter(clause => clause.text.length > 0);
+      const givenClauses = gherkinClauses.filter(clause => clause.keyword === 'given');
+      const actionClauses = gherkinClauses.filter(clause => clause.keyword === 'when');
+      const resultClauses = gherkinClauses.filter(clause => ['then', 'and', 'but'].includes(clause.keyword));
+      const actionText = actionClauses.map(clause => clause.text).join('; ') || acLine;
+      const resultText = resultClauses.map(clause => clause.text).join('; ');
       const isNegative = /(invalid|blank|required|error|unauthorized|reject|fail|forbidden|deny|denied|restrict|incorrect|wrong)/i.test(acLine);
       const isEdge = /(limit|range|max|min|exceed|boundary|duplicate|special character|format|zero|empty|concurrency|timeout)/i.test(acLine);
       const isNonFunctional = /(performance|latency|security|accessibility|audit|scale|speed|integrity|load)/i.test(acLine);
@@ -1300,29 +1312,37 @@ function generateFallbackScenariosForSingleStory(storyText: string, index: numbe
       }
 
       const steps: string[] = [
-        `Navigate to the page/feature of ${featureName}`,
-        `Identify the requirement: "${acLine}"`
+        `Navigate to the ${featureName} feature${givenClauses.length ? ` and establish the precondition: ${givenClauses.map(clause => clause.text).join('; ')}` : ''}`,
+        actionClauses.length ? `Perform the specified action: ${actionText}` : `Exercise the acceptance criterion: "${acLine}"`
       ];
 
       if (isNegative) {
         steps.push(`Provide invalid, blank, or malformed input corresponding to "${acLine}"`);
-        steps.push(`Submit or trigger the action`);
-        steps.push(`Verify that an appropriate validation message or error handler is active`);
       } else if (isEdge) {
         steps.push(`Input boundary value, empty payload, or maximum character length supporting "${acLine}"`);
-        steps.push(`Submit or trigger the action`);
-        steps.push(`Verify system enforces the constraint gracefully and safely`);
-      } else {
-        steps.push(`Input valid and compliant credentials/data as per "${acLine}"`);
-        steps.push(`Perform the primary action`);
-        steps.push(`Verify system registers the action and responds according to the acceptance criterion`);
       }
+      if (resultText) steps.push(`Verify the outcome: ${resultText}`);
+      else if (isNegative) steps.push('Verify the expected validation message and that the invalid action is not accepted');
+      else if (isEdge) steps.push('Verify the boundary condition is handled safely and the resulting state is correct');
+      else steps.push('Verify the feature state and user feedback match the stated acceptance criterion');
+
+      const titleAction = actionText.length > 100 ? `${actionText.slice(0, 97).trim()}...` : actionText;
+      const detailedDescription = [
+        givenClauses.length ? `Precondition: ${givenClauses.map(clause => clause.text).join('; ')}.` : '',
+        actionClauses.length ? `Action: ${actionText}.` : `Validate the requirement: ${acLine}.`,
+        resultText ? `Expected behavior: ${resultText}.` : ''
+      ].filter(Boolean).join(' ');
+      const expectedBehavior = resultText || (isNegative
+        ? `The system rejects the invalid action and provides the appropriate validation feedback for: ${acLine}.`
+        : isEdge
+          ? `The system enforces the stated boundary safely and preserves a valid state for: ${acLine}.`
+          : `The system completes the requested action and reaches the expected state for: ${acLine}.`);
 
       scenarios.push({
         scenarioId: `${prefix}-${scenarioIndex.toString().padStart(2, '0')}`,
-        title: `Verify ${featureName}: ${acLine.slice(0, 100)}`,
-        description: `Execute thorough validation for ${featureName} where ${actor} verifies the acceptance criteria: "${acLine}". This involves functional validation, correct state preservation, and user interface updates.`,
-        expectedResults: `System successfully meets the requirement: "${acLine}". All inputs are correctly handled, actions are saved, and the interface displays the required feedback without errors.`,
+        title: `Verify ${featureName}: ${titleAction}`,
+        description: detailedDescription,
+        expectedResults: expectedBehavior,
         moduleName: featureName,
         type: type,
         scenarioCategory: cat,
@@ -3114,6 +3134,13 @@ export const generateScenariosFromInput = async (description: string, inputType:
     ? `CRITICAL SCENARIO COUNT DIRECTIVE: You are generating test scenarios for ONE specific User Story ("${options.userStoryNumber || 'Story'}: ${options.userStorySummary || ''}"). Generate ONLY 1 to 2 concise, highly relevant, non-repetitive scenario(s) strictly covering the exact acceptance criteria and context of this user story. DO NOT generate unrequested variations or generic boilerplate.`
     : `CRITICAL SCENARIO COUNT DIRECTIVE: Generate only the essential, distinct scenarios directly implied by the input requirements (typically 2 to 5 scenarios). DO NOT inflate scenario counts with redundant or irrelevant variations.`;
 
+  const dualInputContext = [
+    options?.targetUrl ? `Target Website URL: ${options.targetUrl}` : 'No separate target website URL was provided.',
+    options?.featureDescription ? `Feature Description:\n${options.featureDescription}` : 'No separate feature description was provided.',
+    options?.websiteContext ? `Captured Website Context:\n${options.websiteContext}` : '',
+    'When both a target URL and feature description are provided, use BOTH: analyze the target application UI/context and use the description to choose workflows and behaviors to cover. Do not generate scenarios from the description alone or treat the target URL as login context only. Every scenario should reflect the requested feature as it applies to the target application. If the page could not be inspected, still use the URL as the navigation target and scope scenarios to the described feature.'
+  ].filter(Boolean).join('\n\n');
+
   const prompt = `You are an expert QA Test Scenario Generator.
 Your task is to generate requirement-specific, comprehensive test scenarios from the provided input (User Story, Application URL, UI Screenshots/Mockups, or Requirements Document).
 
@@ -3158,6 +3185,9 @@ ${countInstruction}
 
 STEP 4 — TRACEABILITY
 Every scenario must be traceable to a specific requirement, UI component, URL field, or visual element.
+
+DUAL INPUT REQUIREMENT:
+${dualInputContext}
 
 INPUT CONTENT:
 ${description || 'UI Screenshot input provided for visual analysis.'}
@@ -5122,11 +5152,46 @@ export const generateAutomationScript = async (
     return issues;
   };
 
+  const addCaseIdTraceability = (code: string, cases: any[]): string => {
+    const missingCases = cases.filter((testCase, index) => {
+      const caseId = String(testCase.testCaseId || testCase.id || `TC-${index + 1}`).trim();
+      return caseId && !(code || '').toLowerCase().includes(caseId.toLowerCase());
+    });
+    if (missingCases.length === 0) return code;
+
+    const files = parseScriptIntoFiles(code, config.tool as any, config.language as any);
+    if (files.length === 0) return code;
+    const testFileIndex = files.findIndex(file => /(?:^|\/)(?:tests?|specs?|features?)\//i.test(file.path));
+    const sourceFileIndex = files.findIndex(file => /\.(?:[cm]?[jt]sx?|py|java|feature)$/i.test(file.path));
+    const targetIndex = testFileIndex >= 0 ? testFileIndex : sourceFileIndex;
+    if (targetIndex < 0) return code;
+
+    const targetFile = files[targetIndex];
+    const extension = targetFile.path.split('.').pop()?.toLowerCase() || '';
+    const commentPrefix = extension === 'py' || extension === 'feature' ? '# ' : '// ';
+    const traceability = missingCases.map((testCase, index) => {
+      const caseId = String(testCase.testCaseId || testCase.id || `TC-${index + 1}`).trim();
+      const title = String(testCase.title || 'Untitled Test Case').replace(/[\r\n]+/g, ' ').trim();
+      return `${commentPrefix}AutomatiQA test case coverage: ${caseId} - ${title}`;
+    }).join('\n');
+    files[targetIndex] = { ...targetFile, content: `${targetFile.content.trimEnd()}\n\n${traceability}\n` };
+
+    return files.map(file => {
+      const ext = file.path.split('.').pop()?.toLowerCase() || '';
+      const languageTag = ext === 'py' ? 'python' : ext === 'java' ? 'java' : ext === 'ts' || ext === 'tsx' ? 'typescript' : ext === 'js' || ext === 'jsx' ? 'javascript' : ext;
+      return `### \`${file.path}\`\n\`\`\`${languageTag}\n${file.content}\n\`\`\``;
+    }).join('\n\n');
+  };
+
   const requestCompleteScript = async (cases: any[], requestContext: any): Promise<string> => {
     let code = await requestScript(cases, requestContext);
     let issues = coverageIssues(code, cases);
     if (issues.length > 0) {
       code = await requestScript(cases, { ...requestContext, coverageRepair: true });
+      issues = coverageIssues(code, cases);
+    }
+    if (issues.length > 0 && issues.every(issue => issue.startsWith('missing test case '))) {
+      code = addCaseIdTraceability(code, cases);
       issues = coverageIssues(code, cases);
     }
     if (issues.length > 0) {
@@ -5163,11 +5228,12 @@ export const generateAutomationScript = async (
               }
               console.warn(`[geminiService] Batch ${c + 1}/${totalBatches} error, using fallback generator:`, e);
               const fallbackCode = generateFallbackAutomationScript(batchCases, config, batchContext);
-              const issues = coverageIssues(fallbackCode, batchCases);
+              const traceableFallback = addCaseIdTraceability(fallbackCode, batchCases);
+              const issues = coverageIssues(traceableFallback, batchCases);
               if (issues.length > 0) {
                 throw new Error(`Could not generate complete scripts for batch ${c + 1}/${totalBatches}: ${issues.join('; ')}`);
               }
-              return { batchIndex: c, code: fallbackCode, cases: batchCases };
+              return { batchIndex: c, code: traceableFallback, cases: batchCases };
             }
           })()
         );
@@ -5236,7 +5302,11 @@ export const generateAutomationScript = async (
     console.warn("generateAutomationScript request failed, using fallback framework:", err);
     code = generateFallbackAutomationScript(targetCases, config, context);
   }
-  const issues = coverageIssues(code, targetCases);
+  let issues = coverageIssues(code, targetCases);
+  if (issues.length > 0 && issues.every(issue => issue.startsWith('missing test case '))) {
+    code = addCaseIdTraceability(code, targetCases);
+    issues = coverageIssues(code, targetCases);
+  }
   if (issues.length > 0) {
     throw new Error(`Could not generate complete scripts for the selected test cases: ${issues.join('; ')}`);
   }

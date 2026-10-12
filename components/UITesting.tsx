@@ -7205,7 +7205,7 @@ ${activeVideoFrames.map((f, i) => `#### Frame ${i + 1} (@ Timestamp ${f.timestam
     ];
 
     // Record in in-memory & localStorage tombstones
-    addDeletedIds(tombstones);
+    addDeletedIds(tombstones, project.id);
 
     // Call Firestore delete and backend delete endpoint
     if (project?.id) {
@@ -7272,7 +7272,7 @@ ${activeVideoFrames.map((f, i) => `#### Frame ${i + 1} (@ Timestamp ${f.timestam
   };
 
   const executeDeleteItem = (type: 'input' | 'report' | 'figma' | 'comparison', id: string) => {
-    addDeletedIds([id]);
+    addDeletedIds([id], project.id);
     const existingDeleted = Array.isArray(project.deletedItemIds) ? project.deletedItemIds : [];
     const nextDeleted = Array.from(new Set([...existingDeleted, id].filter(Boolean)));
 

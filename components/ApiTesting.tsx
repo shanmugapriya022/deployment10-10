@@ -1,9 +1,9 @@
 import { AlertCircle, AlertTriangle, Activity, Beaker, Braces, CheckSquare, ChevronDown, ChevronRight, Clock, Code, Cpu, Database, Download, Edit2, Eye, FileCode, FileJson, FileText, Fingerprint, Folder as FolderIcon, FolderOpen, FolderPlus, Globe, HelpCircle, Info, Key, Layers, Link2, Loader2, Lock, MessageSquare, MoreHorizontal, MoreVertical, Network, Pencil, Plus, PlusCircle as PlusIcon, PlusCircle, PlusSquare, Save, Send, Shield, ShieldAlert, ShieldCheck, Sparkles, Square, Terminal, Trash2, User as UserIcon, X, Zap, ExternalLink, Check } from 'lucide-react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { generateScenariosFromApiResponse, buildFallbackApiScenarios } from '../geminiService';
+import { generateScenariosFromApiResponse, buildFallbackApiScenarios, isCreditLimitError } from '../geminiService';
 import { logActivity } from '../services/activityService';
-import { deductExportCredits, deductProjectCredits } from '../services/creditService';
+import { canPerformAction, deductExportCredits, deductProjectCredits } from '../services/creditService';
 import { ragEnrichPrompt, indexSingleItem } from '../services/ragService';
 import { RAGStatusBadge } from './RAGStatusBadge';
 import { VectorSearchResult } from '../types';
@@ -986,6 +986,12 @@ const ApiTesting: React.FC<ApiTestingProps> = ({ project, user, onUpdateProject 
 
     try {
       const currentProj = projectRef.current;
+      const permission = await canPerformAction(currentProj.id, 'api_testing', 'analysis', currentProj.name);
+      if (!permission.allowed) {
+        toast.error(permission.reason || 'Project credits are insufficient to generate API scenarios.');
+        return;
+      }
+
       let workspaces = [...(currentProj.apiWorkspaces || [])];
 
       // If no workspace exists, initialize default workspace and collection
@@ -1250,6 +1256,7 @@ const ApiTesting: React.FC<ApiTestingProps> = ({ project, user, onUpdateProject 
       try {
         generatedScenarios = (await generateScenariosFromApiResponse(requestDetails, responseToSave ? responseToSave.data : null)) as any[];
       } catch (genErr: any) {
+        if (isCreditLimitError(genErr)) throw genErr;
         console.warn('generateScenariosFromApiResponse encountered note, falling back to structured generator:', genErr);
       }
 

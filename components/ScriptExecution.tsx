@@ -213,7 +213,7 @@ export const ScriptExecution: React.FC<ScriptExecutionProps> = ({
   const [copiedCode, setCopiedCode] = useState(false);
   const [activeFileMap, setActiveFileMap] = useState<Record<string, number>>({});
   const [modalActiveFileIndex, setModalActiveFileIndex] = useState(0);
-  const [deletedScriptIds, setDeletedScriptIds] = useState<Set<string>>(() => getDeletedIds());
+  const [deletedScriptIds, setDeletedScriptIds] = useState<Set<string>>(() => getDeletedIds(project.id));
   const [isVideoSizeAlertOpen, setIsVideoSizeAlertOpen] = useState(false);
   const [oversizedVideoMB, setOversizedVideoMB] = useState<number | undefined>(undefined);
 
@@ -350,7 +350,7 @@ automation-project/
 
   // Filter scripts: display ONLY approved scripts belonging to the active project
   const scriptsToDisplay = useMemo(() => {
-    const deletedIds = new Set<string>([...getDeletedIds(), ...deletedScriptIds]);
+    const deletedIds = new Set<string>([...getDeletedIds(project.id), ...deletedScriptIds]);
     const isDeleted = (id?: string) => {
       if (!id) return true;
       const clean = id.trim();

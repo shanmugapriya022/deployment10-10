@@ -585,12 +585,15 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
   const handleImportGraphFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (!/\.(jtl|hps)$/i.test(file.name)) {
+    const normalizedFileName = file.name.trim().toLowerCase();
+    const isSupportedGraphFile = /\.(jtl|hps)$/.test(normalizedFileName) ||
+      file.type.trim().toLowerCase() === 'application/vnd.hp-hps';
+    if (!isSupportedGraphFile) {
       toast.error("Unsupported file type. Please select a valid .hps or .jtl file for Graph Reports.");
       e.target.value = '';
       return;
     }
-    setStagedGraphName(file.name);
+    setStagedGraphName(file.name.trim());
     const reader = new FileReader();
     reader.onload = (event) => setStagedGraphContent(event.target?.result as string);
     reader.readAsText(file);
@@ -895,7 +898,7 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
 
   // Memoized sorted archives combining project state and local backup
   const allPerformanceScripts = useMemo(() => {
-    const deletedIds = getDeletedIds();
+    const deletedIds = getDeletedIds(project.id);
     const scripts = [...(project.performanceScripts || [])];
     const scriptMap = new Map<string, PerformanceScript>();
     scripts.forEach(s => {
@@ -1021,7 +1024,7 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
 
     const countToDelete = selectedArchiveIds.size;
     const idsToDelete = Array.from(selectedArchiveIds);
-    addDeletedIds(idsToDelete);
+    addDeletedIds(idsToDelete, project.id);
     const updatedArchives = archives.filter(a => !selectedArchiveIds.has(a.id));
     
     try {
@@ -1058,7 +1061,7 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
     const scriptId = artifactToDelete.id;
     const scriptName = artifactToDelete.name || 'Artifact';
     
-    addDeletedIds([scriptId]);
+    addDeletedIds([scriptId], project.id);
     const updatedArchives = archives.filter(s => s.id !== scriptId);
     
     try {
@@ -1098,7 +1101,7 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
     if (item) {
       setArtifactToDelete(item);
     } else {
-      addDeletedIds([scriptId]);
+      addDeletedIds([scriptId], project.id);
       const updatedArchives = archives.filter(s => s.id !== scriptId);
       try {
         if (typeof localStorage !== 'undefined') {
@@ -1609,7 +1612,7 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
                   <FileUp size={16} /> {stagedGraphName ? 'Update Graph File' : 'Import Graph Report'}
                 </button>
                 {stagedGraphName && <p className="text-[9px] font-black text-indigo-400 uppercase tracking-tighter ml-2 truncate max-w-[150px]">{stagedGraphName}</p>}
-                <input type="file" ref={graphFileInputRef} className="hidden" accept=".jtl,.hps" onChange={handleImportGraphFile} />
+                <input type="file" ref={graphFileInputRef} className="hidden" accept=".jtl,.hps,application/vnd.hp-hps" onChange={handleImportGraphFile} />
               </div>
 
               <div className="flex flex-col gap-1">

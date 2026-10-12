@@ -132,14 +132,11 @@ export const getScenarioMetrics = (scenarios: any[], deletedIds?: Set<string> | 
     if (!isScenarioItem(s)) return false;
     if (!s.id) return false;
     const sId = String(s.id).toLowerCase().trim();
-    const scId = s.scenarioId ? String(s.scenarioId).toLowerCase().trim() : '';
-
     if (
       deletedSet.has(s.id) ||
       deletedSet.has(sId) ||
       deletedSet.has(`folder-${s.id}`) ||
-      deletedSet.has(`folder-${sId}`) ||
-      (scId && !['scenario_folder', 'testcase_folder', 'manual_folder', 'input_source'].includes(scId) && (deletedSet.has(s.scenarioId) || deletedSet.has(scId)))
+      deletedSet.has(`folder-${sId}`)
     ) {
       return false;
     }
@@ -190,10 +187,13 @@ export const getScenarioMetrics = (scenarios: any[], deletedIds?: Set<string> | 
  * Persistent Tombstone helpers to permanently record deleted folder/item IDs
  * and prevent them from resurrecting on snapshot updates or after page reloads.
  */
-export const getDeletedIds = (): Set<string> => {
+export const getDeletedIds = (projectId?: string): Set<string> => {
   if (typeof window === 'undefined') return new Set();
+  // Tombstones must be isolated by project. A single global list lets a delete
+  // in one project hide an unrelated item with the same ID/name in another.
+  if (!projectId) return new Set();
   try {
-    const raw = localStorage.getItem('automatiqa_deleted_ids');
+    const raw = localStorage.getItem(`automatiqa_deleted_ids_${projectId}`);
     if (raw) {
       const arr = JSON.parse(raw);
       if (Array.isArray(arr)) {
@@ -205,10 +205,13 @@ export const getDeletedIds = (): Set<string> => {
   return new Set();
 };
 
-export const addDeletedIds = (ids: string[]) => {
+export const addDeletedIds = (ids: string[], projectId?: string) => {
   if (typeof window === 'undefined' || !ids || ids.length === 0) return;
+  // Older call sites may not have a project ID. The project document itself
+  // remains the durable tombstone source, so never fall back to a global list.
+  if (!projectId) return;
   try {
-    const current = getDeletedIds();
+    const current = getDeletedIds(projectId);
     ids.forEach(id => {
       if (id && typeof id === 'string') {
         const trimmed = id.trim();
@@ -218,7 +221,7 @@ export const addDeletedIds = (ids: string[]) => {
         }
       }
     });
-    localStorage.setItem('automatiqa_deleted_ids', JSON.stringify(Array.from(current)));
+    localStorage.setItem(`automatiqa_deleted_ids_${projectId}`, JSON.stringify(Array.from(current)));
   } catch (e) {}
 };
 
@@ -240,8 +243,6 @@ export interface AiTestCaseMetrics {
  */
 export const isAiTestCaseFolder = (s: any, scenarios: any[] = []): boolean => {
   if (!s || !s.id) return false;
-  const deleted = getDeletedIds();
-  if (deleted.has(s.id)) return false;
   if (s.scenarioId === 'MANUAL_FOLDER' || s.folderType === 'manual') return false;
   if (s.scenarioId === 'SCRIPT_GENERATOR_FOLDER' || s.folderType === 'script_generator') return false;
   if (s.moduleName === 'Script Generator') return false;
@@ -264,7 +265,7 @@ export const isAiTestCaseFolder = (s: any, scenarios: any[] = []): boolean => {
 export const getAiTestCasesWithScenario = (project: any): AiTestCaseItem[] => {
   if (!project || !Array.isArray(project.scenarios)) return [];
   const scenarios: TestScenario[] = project.scenarios;
-  const deleted = getDeletedIds();
+  const deleted = getDeletedIds(project.id);
 
   const isStructuralScenario = (s: any): boolean => {
     if (!s) return false;
@@ -446,18 +447,25 @@ export const getAiTestCaseMetrics = (projectOrProjects: any | any[]): AiTestCase
 
 export const cleanProjectDeletedItems = (project: any): any => {
   if (!project) return project;
-  const deleted = getDeletedIds();
-  if (Array.isArray(project.deletedItemIds)) {
-    project.deletedItemIds.forEach((id: string) => {
+  // Older builds copied one global tombstone list into every project. Those
+  // legacy lists can contain IDs belonging to unrelated saved scenarios. Only
+  // trust persisted tombstones written after the project-scoped migration.
+  const hasScopedTombstones = project.deletedItemIdsVersion === 2;
+  const deleted = getDeletedIds(project.id);
+  const persistedDeletedIds = hasScopedTombstones && Array.isArray(project.deletedItemIds)
+    ? project.deletedItemIds
+    : [];
+  persistedDeletedIds.forEach((id: string) => {
       if (id) {
         deleted.add(id);
         deleted.add(id.toLowerCase());
         deleted.add(`folder-${id}`);
       }
-    });
-  }
+  });
 
   const cleaned = { ...project };
+  cleaned.deletedItemIdsVersion = 2;
+  cleaned.deletedItemIds = Array.from(new Set([...persistedDeletedIds, ...Array.from(deleted)].filter(Boolean)));
 
   // Isolate API testing scenarios from project.scenarios into project.apiScenarios
   if (Array.isArray(cleaned.scenarios)) {
@@ -489,14 +497,12 @@ export const cleanProjectDeletedItems = (project: any): any => {
       .filter((s: any) => {
         if (!s || !s.id) return false;
         const sId = String(s.id).toLowerCase().trim();
-        const scId = s.scenarioId ? String(s.scenarioId).toLowerCase().trim() : '';
         const titleNorm = s.title ? String(s.title).toLowerCase().trim() : '';
         if (
           deleted.has(s.id) ||
           deleted.has(sId) ||
           deleted.has(`folder-${s.id}`) ||
           deleted.has(`folder-${sId}`) ||
-          (scId && (deleted.has(s.scenarioId) || deleted.has(scId))) ||
           (titleNorm && (deleted.has(s.title) || deleted.has(titleNorm)))
         ) {
           return false;
@@ -692,8 +698,7 @@ export const cleanProjectDeletedItems = (project: any): any => {
   }
 
   // Ensure deletedItemIds is kept complete on cleaned project
-  const existingDeletedList = Array.isArray(cleaned.deletedItemIds) ? cleaned.deletedItemIds : [];
-  cleaned.deletedItemIds = Array.from(new Set([...existingDeletedList, ...Array.from(deleted)].filter(Boolean)));
+  cleaned.deletedItemIds = Array.from(new Set([...persistedDeletedIds, ...Array.from(deleted)].filter(Boolean)));
   return syncFolderReferences(cleaned);
 };
 
@@ -1490,14 +1495,53 @@ export const saveScenariosToFirestore = async (
   const casesRef = collection(db, "projects", projectId, SCENARIO_CASES_COLLECTION);
   const deleted = normalizedDeletionSet(deletedItemIds);
   const operations: Array<(batch: ReturnType<typeof writeBatch>) => void> = [];
+  // Scenario documents are long-lived records. Read the current version first
+  // so a stale client snapshot with blank text or an empty folder member list
+  // cannot erase the last persisted values.
+  const existingRecords = await getDocs(recordsRef);
+  const existingById = new Map<string, Record<string, any>>();
+  existingRecords.docs.forEach(snapshot => {
+    const record = snapshot.data() as Record<string, any>;
+    const id = String(record.id || snapshot.id);
+    existingById.set(id, record);
+  });
+  const firstText = (...values: unknown[]): string => {
+    for (const value of values) {
+      if (typeof value === 'string' && value.trim()) return value;
+    }
+    return '';
+  };
 
   scenarios.forEach(scenario => {
     if (!scenario?.id || deleted.has(String(scenario.id).trim().toLowerCase())) return;
 
     const scenarioDocId = encodeURIComponent(String(scenario.id));
     const { testCases = [], ...scenarioData } = scenario as TestScenario & { testCases?: TestCase[] };
-    operations.push(batch => batch.set(doc(recordsRef, scenarioDocId), cleanFirestoreData({
+    const existing = existingById.get(String(scenario.id)) || {};
+    const savedMembers = Array.isArray(existing.memberScenarioIds) ? existing.memberScenarioIds : [];
+    const incomingMembers = Array.isArray(scenarioData.memberScenarioIds) ? scenarioData.memberScenarioIds : [];
+    const memberScenarioIds = incomingMembers.length > 0
+      ? incomingMembers
+      : savedMembers.filter(memberId => !deleted.has(String(memberId).trim().toLowerCase()));
+    const durableScenarioData = {
+      ...existing,
       ...scenarioData,
+      description: firstText(scenarioData.description, scenarioData.scenarioDescription, existing.description, existing.scenarioDescription),
+      expectedResults: firstText(scenarioData.expectedResults, scenarioData.expectedResult, existing.expectedResults, existing.expectedResult),
+      folderId: firstText(
+        scenarioData.folderId,
+        deleted.has(String(existing.folderId || '').trim().toLowerCase()) ? '' : existing.folderId
+      ),
+      folderName: firstText(
+        scenarioData.folderName,
+        deleted.has(String(existing.folderId || '').trim().toLowerCase()) ? '' : existing.folderName
+      ),
+      ...(Array.isArray(scenarioData.memberScenarioIds) || Array.isArray(existing.memberScenarioIds)
+        ? { memberScenarioIds }
+        : {})
+    };
+    operations.push(batch => batch.set(doc(recordsRef, scenarioDocId), cleanFirestoreData({
+      ...durableScenarioData,
       id: scenario.id
     })));
 
@@ -1515,7 +1559,7 @@ export const saveScenariosToFirestore = async (
   });
 
   if (deleted.size > 0) {
-    const [existingRecords, existingCases] = await Promise.all([getDocs(recordsRef), getDocs(casesRef)]);
+    const existingCases = await getDocs(casesRef);
     existingRecords.docs.forEach(snapshot => {
       const record = snapshot.data();
       const id = String(record.id || snapshot.id);

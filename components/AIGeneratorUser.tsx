@@ -43,7 +43,7 @@ import { generateUserStoriesFromDoc, generateFallbackUserStories, isNonFunctiona
 import { parseDocumentFile } from '../utils/docParser';
 import { ScreenshotUploader, ScreenshotFile } from './ScreenshotUploader';
 import { ScreenshotGallery } from './ScreenshotGallery';
-import { calculateCapacityAndEstimates, checkAiGenerationPermission, getProjectCreditSummary } from '../services/tokenConsumptionService';
+import { calculateCapacityAndEstimates, getProjectCreditSummary } from '../services/tokenConsumptionService';
 import { canPerformAction, deductProjectCredits, deductProjectCreditsLocal } from '../services/creditService';
 import { downloadExcel, downloadCsv } from '../utils/exportUtils';
 import { ragEnrichPrompt, indexSingleItem } from '../services/ragService';
@@ -167,7 +167,7 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
   // Load subcollection folders and stories from Firestore on mount or project switch
   useEffect(() => {
     if (!project?.id) return;
-    const deletedIds = getDeletedIds();
+    const deletedIds = getDeletedIds(project.id);
     loadAllProjectFoldersAndStories(project.id).then(hierarchy => {
       if (hierarchy && hierarchy.allStoriesAndFolders && hierarchy.allStoriesAndFolders.length > 0) {
         const existing = (project.userStories || []).filter(item => 
@@ -458,22 +458,17 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
 
     // 1. GATEKEEPER: Check credit permissions BEFORE starting generation
     const perm = await canPerformAction(project.id, 'ai_user_stories', 'analysis', project.name);
-    const localPerm = checkAiGenerationPermission(user?.email, 'ai_user_stories', project.id, project.name);
     const projectSummary = getProjectCreditSummary(project.id, project.name);
-    const requiredCredits = perm.cost || 5;
 
-    const isCreditExceeded = (
-      !perm.allowed ||
-      !localPerm.allowed ||
-      projectSummary.remainingCredits < requiredCredits ||
-      projectSummary.isExpired
-    );
+    // canPerformAction checks the authoritative server balance and only falls
+    // back to the local cache when the server is unavailable. Avoid rechecking
+    // stale browser logs here, since they can contradict that result.
+    const isCreditExceeded = !perm.allowed;
 
     if (isCreditExceeded) {
       const gentleReason = (
         perm.reason ||
-        localPerm.reason ||
-        `Insufficient credits: Project "${project.name}" has ${projectSummary.remainingCredits} credits remaining (5 required for User Stories). Please top up or renew your plan.`
+        `Insufficient credits: Project "${project.name}" has ${projectSummary.remainingCredits} credits remaining (${perm.cost || 5} required for User Stories). Please top up or renew your plan.`
       );
 
       setCreditNotAvailableError(gentleReason);
@@ -485,7 +480,7 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
             functionName: 'generateUserStoriesFromDoc',
             userEmail: user?.email,
             reason: gentleReason,
-            remainingCredits: projectSummary.remainingCredits ?? 0
+            remainingCredits: perm.remainingCredits ?? projectSummary.remainingCredits ?? 0
           }
         }));
       }
@@ -585,9 +580,9 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
         ) {
           toast.dismiss('ai-gen');
           setIsGenerating(false);
-          const creditMsg = `Credit not available: Credit limit reached for project "${project.name}". User Story generation is paused until credits are renewed.`;
+          const creditMsg = genErr?.message || `Credit not available for project "${project.name}". Please check the project credit balance and try again.`;
           setCreditNotAvailableError(creditMsg);
-          toast.error("Credit not available: Credit limit reached.");
+          toast.error(creditMsg);
           return;
         }
       }
@@ -861,7 +856,7 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
     if (isFolder && targetStory?.memberStoryIds) {
       idsToDelete.push(...targetStory.memberStoryIds);
     }
-    addDeletedIds(idsToDelete);
+    addDeletedIds(idsToDelete, project.id);
 
     // Also delete from Firestore subcollections asynchronously
     if (isFolder) {
@@ -1555,7 +1550,7 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
   // Delete a subfolder and restore its stories to parent folder
   const handleDeleteSubfolder = (subfolder: UserStory, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
-    addDeletedIds([subfolder.id]);
+    addDeletedIds([subfolder.id], project.id);
 
     try {
       const localBackupStr = localStorage.getItem(`automatiqa_project_backup_${project.id}`);
@@ -1747,7 +1742,7 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
 
   const performBulkDelete = async () => {
     const selectedIds = Array.from(selectedStoryIds);
-    addDeletedIds(selectedIds);
+    addDeletedIds(selectedIds, project.id);
 
     try {
       const localBackupStr = localStorage.getItem(`automatiqa_project_backup_${project.id}`);

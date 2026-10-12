@@ -581,7 +581,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
 
   // Clean up unsavedScripts when scripts are deleted, already saved, or empty/corrupted
   useEffect(() => {
-    const deletedIds = getDeletedIds();
+    const deletedIds = getDeletedIds(project.id);
     const savedIds = new Set((project.automationScripts || []).map(s => s.id));
 
     setUnsavedScripts(prev => {
@@ -803,7 +803,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
 
   // Helper to resolve test cases from a single scenario (only extracts actual test cases, never synthesizes from raw AI scenarios)
   const getScenarioCases = useCallback((scen: TestScenario): TestCase[] => {
-    const deletedIds = getDeletedIds();
+    const deletedIds = getDeletedIds(project.id);
     if (isApiTestingScenario(scen) || isAIScenarioFolder(scen) || isAIScenario(scen) || deletedIds.has(scen.id) || deletedIds.has(`TC-${scen.id}`)) {
       return [];
     }
@@ -825,7 +825,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
 
   // Helper to resolve all test cases for a folder
   const getFolderCases = useCallback((folder: TestScenario): TestCase[] => {
-    const deletedIds = getDeletedIds();
+    const deletedIds = getDeletedIds(project.id);
     if (isApiTestingScenario(folder) || isAIScenarioFolder(folder) || deletedIds.has(folder.id)) {
       return [];
     }
@@ -924,7 +924,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
 
   // Actual Folders strictly for the FOLDERS section (Script Generator saved folders & approved test case folders)
   const validFolders = useMemo(() => {
-    const deletedIds = getDeletedIds();
+    const deletedIds = getDeletedIds(project.id);
     // Key by normalized folder title to prevent duplicate folders with the same name
     const folderMap = new Map<string, TestScenario>();
 
@@ -1106,7 +1106,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
 
   // Standalone individual test cases (strictly excludes AI scenarios and AI scenario folders; requires approved test cases)
   const validIndividualScenarios = useMemo(() => {
-    const deletedIds = getDeletedIds();
+    const deletedIds = getDeletedIds(project.id);
     return (project.scenarios || []).filter(s => 
       !isAnyFolder(s) &&
       !isAIScenarioFolder(s) &&
@@ -1124,7 +1124,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
   const validScenarios = validFolders;
 
   const allTestCases = useMemo(() => {
-    const deletedIds = getDeletedIds();
+    const deletedIds = getDeletedIds(project.id);
     const list: Array<{ scenario: TestScenario; testCase: TestCase }> = [];
     const seenCaseIds = new Set<string>();
 
@@ -1189,7 +1189,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
 
   // Clean up selectedCaseIds if any selected case has been deleted
   useEffect(() => {
-    const deletedIds = getDeletedIds();
+    const deletedIds = getDeletedIds(project.id);
     setSelectedCaseIds(prev => {
       const next = new Set<string>();
       prev.forEach(id => {
@@ -1201,7 +1201,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
 
   // Saved automation scripts
   const savedScripts = useMemo(() => {
-    const deletedIds = getDeletedIds();
+    const deletedIds = getDeletedIds(project.id);
     return (project.automationScripts || []).filter(s => {
       // Exclude scripts originating from Record & Play or Video Flows
       if (s.source === 'record_play' || s.source === 'upload_video' || Boolean(s.videoFlowId)) return false;
@@ -1213,7 +1213,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
 
   // All scripts in repository (both unsaved generated drafts and saved scripts)
   const allArtifacts = useMemo(() => {
-    const deletedIds = getDeletedIds();
+    const deletedIds = getDeletedIds(project.id);
     // Valid unsaved generated drafts (not deleted by user)
     const validUnsaved = unsavedScripts.filter(s => {
       if (!s || !s.id) return false;
@@ -1233,7 +1233,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
 
   // Distinct folders for repository filter
   const repositoryFolders = useMemo(() => {
-    const deletedIds = getDeletedIds();
+    const deletedIds = getDeletedIds(project.id);
     const foldersMap = new Map<string, { id: string; name: string; count: number; isImported?: boolean }>();
     
     // 1. Only include empty folders from automationFolders if explicitly created by user
@@ -1282,7 +1282,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
   // Grouped Script Folders for Tab 2 (SCRIPT FOLDERS) - Non-imported generated POM scripts only
   // Each generated script is mapped strictly to the folder where it was generated or saved
   const groupedScriptFolders = useMemo(() => {
-    const deletedIds = getDeletedIds();
+    const deletedIds = getDeletedIds(project.id);
     const map = new Map<string, { folderId: string; folderName: string; scripts: AutomationScript[] }>();
     const seenScriptIds = new Set<string>();
 
@@ -1337,7 +1337,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
   // Grouped Script Folders for Tab 3 (IMPORTED SCRIPT FOLDERS) - Imported scripts only
   // Each imported script is mapped strictly to its imported folder
   const groupedImportedScriptFolders = useMemo(() => {
-    const deletedIds = getDeletedIds();
+    const deletedIds = getDeletedIds(project.id);
     const map = new Map<string, { folderId: string; folderName: string; scripts: AutomationScript[] }>();
     const seenScriptIds = new Set<string>();
 
@@ -1378,7 +1378,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
 
   // Available folders for the currently active tab in repository
   const availableRepositoryFolders = useMemo(() => {
-    const deletedIds = getDeletedIds();
+    const deletedIds = getDeletedIds(project.id);
     if (activeTab === 'imported') {
       return groupedImportedScriptFolders;
     } else if (activeTab === 'scripts') {
@@ -1849,7 +1849,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
     const idsToDelete = Array.from(selectedScriptIds);
 
     // Add tombstones
-    addDeletedIds(idsToDelete);
+    addDeletedIds(idsToDelete, project.id);
 
     setUnsavedScripts(prev => prev.filter(s => !selectedScriptIds.has(s.id)));
     const updatedScripts = (project.automationScripts || []).filter(s => !selectedScriptIds.has(s.id));
@@ -1914,7 +1914,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
 
     const updatedManualCases = (project.manualTestCases || []).filter(mc => !targetIds.has(mc.id));
 
-    addDeletedIds(tombstonesToAdd);
+    addDeletedIds(tombstonesToAdd, project.id);
 
     const existingIds = new Set(updatedScenarios.map(s => s.id));
     const finalScenarios = updatedScenarios.map(scen => {
@@ -1963,7 +1963,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
     });
 
     const updatedScenarios = (project.scenarios || []).filter(s => !targetFolderIds.has(s.id));
-    addDeletedIds(tombstonesToAdd);
+    addDeletedIds(tombstonesToAdd, project.id);
 
     const existingIds = new Set(updatedScenarios.map(s => s.id));
     const finalScenarios = updatedScenarios.map(scen => {
@@ -2047,7 +2047,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
       })
       .filter(Boolean) as TestScenario[];
 
-    addDeletedIds(tombstonesToAdd);
+    addDeletedIds(tombstonesToAdd, project.id);
 
     const existingIds = new Set(updatedScenarios.map(s => s.id));
     const finalScenarios = updatedScenarios.map(scen => {
@@ -2081,7 +2081,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
     const tombstonesToAdd: string[] = [folderId, ...Array.from(folderCaseIds)];
 
     const updatedScenarios = (project.scenarios || []).filter(s => s.id !== folderId);
-    addDeletedIds(tombstonesToAdd);
+    addDeletedIds(tombstonesToAdd, project.id);
 
     const updatedProject = { ...project, scenarios: updatedScenarios };
     saveProjectBackup(updatedProject);
@@ -2143,7 +2143,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
       ...Array.from(scriptIdsToDelete)
     ];
 
-    addDeletedIds(allTombstones);
+    addDeletedIds(allTombstones, project.id);
 
     // Call folderPersistenceService to delete folder document in Firestore
     deleteFolderFromFirestore(project.id, folderId).catch(() => {});
@@ -2227,7 +2227,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
   const handleConfirmDeleteScript = () => {
     if (!deleteScriptTarget) return;
     const scriptId = deleteScriptTarget.id;
-    addDeletedIds([scriptId]);
+    addDeletedIds([scriptId], project.id);
 
     // Remove from unsaved scripts if draft
     setUnsavedScripts(prev => prev.filter(s => s.id !== scriptId));
@@ -2252,7 +2252,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
 
   // Handle Script Generation
   const handleGenerateScript = async () => {
-    const deletedIds = getDeletedIds();
+    const deletedIds = getDeletedIds(project.id);
     let targetCases: TestCase[] = [];
     const seenTargetIds = new Set<string>();
 
@@ -3171,7 +3171,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
 
   // Delete Script
   const handleDeleteScript = (scriptId: string) => {
-    addDeletedIds([scriptId]);
+    addDeletedIds([scriptId], project.id);
     setUnsavedScripts(prev => prev.filter(s => s.id !== scriptId));
     const updatedScripts = (project.automationScripts || []).filter(s => s.id !== scriptId);
     const updatedProject = { ...project, automationScripts: updatedScripts };
@@ -3427,7 +3427,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
   // Available test cases for the Append Modal
   const availableModalTestCases = useMemo(() => {
     if (!appendModalScript) return [];
-    const deletedIds = getDeletedIds();
+    const deletedIds = getDeletedIds(project.id);
     const list: { id: string; title: string; scenarioTitle: string; priority?: string; type?: string; isAlreadyInScript: boolean }[] = [];
     const seen = new Set<string>();
 
@@ -3505,7 +3505,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
     if (!appendModalScript) return;
     const { script, selectedCaseIds: modalCaseIds, instruction } = appendModalScript;
 
-    const deletedIds = getDeletedIds();
+    const deletedIds = getDeletedIds(project.id);
     const targetCases: TestCase[] = [];
     const seenIds = new Set<string>();
 

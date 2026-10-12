@@ -720,6 +720,7 @@ export interface Project {
     enabled: boolean;
   };
   deletedItemIds?: string[];
+  deletedItemIdsVersion?: number;
 }
 
 export interface SyntheticUser {

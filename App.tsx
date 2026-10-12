@@ -95,7 +95,7 @@ import { Sliders, Github, Sparkles, UserPlus, Slack, Gauge } from 'lucide-react'
 import { Project, ApiTestSuite, User, UserRole, AppNotification, ApiRequest, ApiTestSuiteEvidence, TestStatus, TestCase, TestPriority, TestType, TestIntent, isApiTestingScenario } from './types';
 import { logActivity } from './services/activityService';
 import { markAsRead } from './services/notificationService';
-import { cleanFirestoreData, updateProjectFirestore, estimateSize, getDeletedIds, cleanProjectDeletedItems, addDeletedIds, filterUserAccessibleProjects, loadScenariosFromFirestore } from './services/projectService';
+import { cleanFirestoreData, updateProjectFirestore, estimateSize, getDeletedIds, cleanProjectDeletedItems, filterUserAccessibleProjects, loadScenariosFromFirestore } from './services/projectService';
 import { getSubscriptionRequests, subscribeToSubscriptionRequests } from './services/subscriptionService';
 import { getProjectPlans, subscribeToProjectPlans, getFirestoreTokenLogs, subscribeToFirestoreTokenLogs } from './services/tokenConsumptionService';
 import { saveProjectBackup, mergeAutomationScriptsWithBackup, mergeUploadVideoFlowsWithBackup, mergeRecordedFlowsWithBackup, mergeFoldersWithBackup, mergeProjectWithBackupData, filterDeletedScriptFiles, mergePerformanceScriptsWithBackup, mergeUserStoriesWithBackup, mergeScenariosWithBackup, syncFolderReferences, mergeUITestingFoldersWithBackup, mergeUITestingReportsWithBackup, mergeFigmaDesignReviewsWithBackup, mergeUIComparisonReportsWithBackup, mergeUITestingInputsWithBackup, getProjectBackupSync } from './services/storageBackupService';
@@ -556,7 +556,7 @@ const App: React.FC = () => {
               const serverBackup = backups[p.id];
               if (!serverBackup) return p;
               const cleanBackup = cleanProjectDeletedItems(serverBackup);
-              return mergeProjectWithBackupData(p, cleanBackup, getDeletedIds());
+              return mergeProjectWithBackupData(p, cleanBackup, getDeletedIds(p.id));
             });
           });
         }
@@ -715,14 +715,9 @@ const App: React.FC = () => {
         }
         return { id: d.id, ...data } as Project;
       });
-      rawProjectsData.forEach(p => {
-        if (Array.isArray(p.deletedItemIds) && p.deletedItemIds.length > 0) {
-          addDeletedIds(p.deletedItemIds);
-        }
-      });
-      const deletedIds = getDeletedIds();
-      
       const projectsData = rawProjectsData.map(p => {
+        const persistedDeletedIds = p.deletedItemIdsVersion === 2 && Array.isArray(p.deletedItemIds) ? p.deletedItemIds : [];
+        const deletedIds = new Set([...persistedDeletedIds, ...getDeletedIds(p.id)]);
         const rawScenarios = p.scenarios || [];
         const apiScenariosInScenarios = rawScenarios.filter((s: any) => isApiTestingScenario(s));
         let cleanScenarios = rawScenarios
@@ -1344,6 +1339,8 @@ const App: React.FC = () => {
           apiScenarios: cleanApiScenarios,
           apiTestSuites: cleanApiTestSuites,
           performanceScripts: cleanPerformanceScripts,
+          deletedItemIds: Array.from(new Set([...persistedDeletedIds, ...getDeletedIds(p.id)])),
+          deletedItemIdsVersion: 2,
           activeExecutionFolderIds: activeFolders,
           excludedFromExecutionIds: excludedIdsList
         });
@@ -1428,7 +1425,7 @@ const App: React.FC = () => {
       if (hierarchy && hierarchy.allStoriesAndFolders && hierarchy.allStoriesAndFolders.length > 0) {
         setProjects(prev => prev.map(p => {
           if (p.id === selectedProjectId) {
-            const merged = mergeUserStoriesWithBackup(p.id, p.userStories || [], getDeletedIds(), hierarchy.allStoriesAndFolders);
+            const merged = mergeUserStoriesWithBackup(p.id, p.userStories || [], getDeletedIds(p.id), hierarchy.allStoriesAndFolders);
             return {
               ...p,
               userStories: merged
@@ -1449,7 +1446,7 @@ const App: React.FC = () => {
             project.id,
             firestoreScenarios,
             project.scenarios || [],
-            getDeletedIds()
+            getDeletedIds(project.id)
           )
         };
       }));
@@ -1647,9 +1644,23 @@ const App: React.FC = () => {
 
   const updateProject = async (updatedProject: Project, options?: { immediate?: boolean }): Promise<void> => {
     if (!updatedProject?.id) return;
+
+    // Merge scenario content against the last known durable copy before any
+    // backup or Firestore write. UI updates from stale component props can
+    // otherwise replace a populated array with blank text or no scenarios.
+    const previousBackup = getProjectBackupSync(updatedProject.id);
+    const withDurableScenarios = {
+      ...updatedProject,
+      scenarios: mergeScenariosWithBackup(
+        updatedProject.id,
+        updatedProject.scenarios || [],
+        previousBackup?.scenarios || [],
+        getDeletedIds(updatedProject.id)
+      )
+    } as Project;
     
     // Ensure all permanently deleted items are stripped
-    const cleanUpdatedProject = cleanProjectDeletedItems(updatedProject);
+    const cleanUpdatedProject = cleanProjectDeletedItems(withDurableScenarios);
 
     // Save multi-tier backup (in-memory, IndexedDB, localStorage, and server backup)
     saveProjectBackup(cleanUpdatedProject);

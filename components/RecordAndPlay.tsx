@@ -4626,7 +4626,7 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
   const handleDeleteFolder = async (folderId: string, folderName?: string) => {
     const idsAndNamesToDelete = [folderId];
     if (folderName) idsAndNamesToDelete.push(folderName);
-    addDeletedIds(idsAndNamesToDelete);
+    addDeletedIds(idsAndNamesToDelete, project.id);
 
     const updatedFolders = (project.automationFolders || []).filter(f => 
       f.id !== folderId && (!folderName || (f.name || '').toLowerCase() !== folderName.toLowerCase())
@@ -4682,7 +4682,7 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
       idsAndNamesToDelete.push(f.id);
       if (f.name) idsAndNamesToDelete.push(f.name);
     });
-    addDeletedIds(idsAndNamesToDelete);
+    addDeletedIds(idsAndNamesToDelete, project.id);
 
     const folderIdsSet = new Set(foldersToDelete.map(f => f.id));
     const folderNamesSet = new Set(foldersToDelete.map(f => (f.name || '').toLowerCase()).filter(Boolean));
@@ -4766,7 +4766,7 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
       return;
     }
 
-    addDeletedIds([targetItem.id]);
+    addDeletedIds([targetItem.id], project.id);
 
     if (targetItem.type === 'flow') {
       const updatedFlows = flows.filter(f => f.id !== targetItem.id);
@@ -4929,6 +4929,18 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
       await new Promise(r => setTimeout(r, delayMs));
     };
 
+    const awaitWithTimeout = function <T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      return Promise.race([
+        promise,
+        new Promise<T>((_, reject) => {
+          timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+        })
+      ]).finally(() => {
+        if (timeoutId) clearTimeout(timeoutId);
+      });
+    };
+
     try {
       // Initiate script generation immediately in parallel with stage transitions
       const scriptPromise = generateAutomationScript(
@@ -4947,7 +4959,11 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
       await updateStage(4, 450); // Stage 5: Finalizing
 
       // Await the script result (by this time generation is either complete or wrapping up)
-      const result = await scriptPromise;
+      const result = await awaitWithTimeout(
+        scriptPromise,
+        4 * 60 * 1000,
+        'Script generation timed out after 4 minutes. Please try again with fewer recorded steps.'
+      );
 
       setGenerationStages(prev => ({
         ...prev,
@@ -5058,16 +5074,21 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
       const updatedFlows = Array.from(existingFlowsMap.values());
       setFlows(updatedFlows);
 
-      await onUpdateProject({
-        ...project,
-        recordedFlows: updatedFlows,
-        automationScripts: updatedScripts,
-        automationFolders: updatedFolders
-      });
+      await awaitWithTimeout(
+        onUpdateProject({
+          ...project,
+          recordedFlows: updatedFlows,
+          automationScripts: updatedScripts,
+          automationFolders: updatedFolders
+        }),
+        15_000,
+        'Scripts were generated, but syncing them to the project is taking too long. The local project state has been updated; please check synchronization before retrying.'
+      );
 
       toast.success(`${selectedTool} (${selectedLanguage}) ${selectedFramework} project generated and saved to Generated Scripts!`);
     } catch (error) {
-      toast.error('Failed to generate project');
+      setGenerationStages(prev => ({ ...prev, active: false }));
+      toast.error(error instanceof Error ? error.message : 'Failed to generate project');
     } finally {
       setIsGenerating(false);
     }

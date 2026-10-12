@@ -47,7 +47,7 @@ import { generateUniqueFolderId } from '../utils/idGenerator';
 import { deductExportCredits, canPerformAction, deductProjectCredits } from '../services/creditService';
 import { downloadExcel, downloadCsv } from '../utils/exportUtils';
 import { logActivity } from '../services/activityService';
-import { addDeletedIds, getScenarioMetrics } from '../services/projectService';
+import { addDeletedIds, getDeletedIds, getScenarioMetrics } from '../services/projectService';
 import { deleteFolderFromFirestore } from '../services/folderPersistenceService';
 import { saveProjectBackup } from '../services/storageBackupService';
 import { ragEnrichPrompt, indexSingleItem } from '../services/ragService';
@@ -219,6 +219,21 @@ interface LastInputDetails {
 
   const scenarios = useMemo(() => (project.scenarios || []).filter(s => !isApiTestingScenario(s)), [project.scenarios]);
 
+  // AI providers and older saved records use both singular and legacy field names.
+  // Normalize them as soon as they enter the project so the UI and persistence
+  // always work with the canonical scenario fields.
+  const getScenarioText = (...values: unknown[]): string => {
+    for (const value of values) {
+      if (typeof value === 'string' && value.trim()) return value;
+    }
+    return '';
+  };
+  const normalizeScenarioContent = <T extends Record<string, any>>(scenario: T): T & { description: string; expectedResults: string } => ({
+    ...scenario,
+    description: getScenarioText(scenario.description, scenario.scenarioDescription),
+    expectedResults: getScenarioText(scenario.expectedResults, scenario.expectedResult)
+  });
+
   // Helper to check if item is a test scenario (not a folder or input source or API test scenario)
   const isScenarioItem = useCallback((s: TestScenario): boolean => {
     if (!s) return false;
@@ -288,7 +303,11 @@ interface LastInputDetails {
   }, [scenarios, newlyGeneratedScenarios]);
 
   // Single source of truth for scenario metrics
-  const scenarioMetrics = useMemo(() => getScenarioMetrics(scenarios, project.deletedItemIds), [scenarios, project.deletedItemIds]);
+  const scenarioDeletedIds = useMemo(() => [
+    ...(project.deletedItemIdsVersion === 2 && Array.isArray(project.deletedItemIds) ? project.deletedItemIds : []),
+    ...getDeletedIds(project.id)
+  ], [project.id, project.deletedItemIdsVersion, project.deletedItemIds]);
+  const scenarioMetrics = useMemo(() => getScenarioMetrics(scenarios, scenarioDeletedIds), [scenarios, scenarioDeletedIds]);
   const totalScenariosCount = scenarioMetrics.total;
   const totalApprovedScenariosCount = scenarioMetrics.approved;
   const totalUnapprovedScenariosCount = scenarioMetrics.unapproved;
@@ -808,6 +827,7 @@ interface LastInputDetails {
     setIsGenerating(true);
 
     let finalInput = '';
+    let generationScreenshots = [...screenshots];
     const loginContext = `\n\nGlobal Login Context:\nURL: ${appUrl}\nUsername: ${username}\nPassword: ${password}`;
 
     if (activeTab === 'text') {
@@ -816,9 +836,44 @@ interface LastInputDetails {
             toast.error("Please provide feature description text or attach screenshot(s)");
             return;
         }
-        finalInput = description.trim() 
-          ? `Primary Input (Feature Description):\n${description}${loginContext}`
-          : `Primary Input: UI Screenshots provided for visual analysis (${screenshots.map(s => s.name || 'Screenshot').join(', ')}).\nAnalyze all visual elements, form fields, headers, buttons, labels, navigation, and workflows shown in the attached screenshot(s) and generate detailed test scenarios specifically matching the UI screenshot.${loginContext}`;
+        let websiteContext = '';
+        if (appUrl.trim()) {
+          try {
+            toast.info(`Capturing and analyzing live UI elements from ${appUrl.trim()}...`);
+            const captureRes = await fetch('/api/capture-url-ui', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ url: appUrl.trim() })
+            });
+            const captureData = await captureRes.json();
+            if (captureData.success) {
+              if (captureData.screenshot && generationScreenshots.length === 0) {
+                const capturedScreenshot = {
+                  id: 'url-capture-' + Date.now(),
+                  name: 'url-ui-mockup.svg',
+                  data: captureData.screenshot,
+                  mimeType: 'image/svg+xml',
+                  previewUrl: captureData.screenshot,
+                  size: captureData.screenshot.length
+                } as ScreenshotFile;
+                generationScreenshots = [capturedScreenshot];
+                setScreenshots(generationScreenshots);
+              }
+              const inputsDesc = (captureData.elements?.inputs || [])
+                .map((i: any) => `${i.label || i.name} (${i.type || 'text'}${i.required ? ', required' : ''})`)
+                .join(', ');
+              const buttonsDesc = (captureData.elements?.buttons || []).join(', ');
+              const headingsDesc = (captureData.elements?.headings || []).join(', ');
+              websiteContext = `\n\nCaptured Website UI Structure & Elements:\nPage Title: ${captureData.pageTitle || 'N/A'}\nMain Headings: ${headingsDesc || 'N/A'}\nForm Inputs: ${inputsDesc || 'N/A'}\nButtons / Actions: ${buttonsDesc || 'N/A'}`;
+            }
+          } catch (captureErr) {
+            console.warn('Global URL capture notice in ScenarioGenerator:', captureErr);
+          }
+        }
+        const screenshotContext = generationScreenshots.length > 0
+          ? `\n\nAnalyze the attached screenshot(s) together with the target website and feature description: ${generationScreenshots.map(s => s.name || 'Screenshot').join(', ')}.`
+          : '';
+        finalInput = `${appUrl.trim() ? `Target Website URL (must be analyzed): ${appUrl.trim()}\n` : ''}${description.trim() ? `Feature Description (must be covered):\n${description.trim()}` : `Analyze the attached UI screenshot(s) and generate scenarios for the visible application workflows.`}${websiteContext}${screenshotContext}${loginContext}`;
     } else if (activeTab === 'url') {
         if (!analysisUrl.trim() && !description.trim() && screenshots.length === 0) {
             setIsGenerating(false);
@@ -838,14 +893,15 @@ interface LastInputDetails {
             const captureData = await captureRes.json();
             if (captureData.success) {
               if (captureData.screenshot && screenshots.length === 0) {
-                setScreenshots([{
+                generationScreenshots = [{
                   id: 'url-capture-' + Date.now(),
                   name: 'url-ui-mockup.svg',
                   data: captureData.screenshot,
                   mimeType: 'image/svg+xml',
                   previewUrl: captureData.screenshot,
                   size: captureData.screenshot.length
-                }]);
+                } as ScreenshotFile];
+                setScreenshots(generationScreenshots);
               }
               const inputsDesc = (captureData.elements?.inputs || [])
                 .map((i: any) => `${i.label || i.name} (${i.type || 'text'}${i.required ? ', required' : ''})`)
@@ -950,8 +1006,8 @@ interface LastInputDetails {
                   ? 'Analyzing attached screenshots with document requirements...'
                   : 'Scenarios generated successfully.');
 
-                let generatedScenarios: TestScenario[] = (statusData.scenarios || []).map((s: any) => ({
-                  ...s,
+                let generatedScenarios: TestScenario[] = (statusData.scenarios || []).map((raw: any) => ({
+                  ...normalizeScenarioContent(raw),
                   appUrl: appUrl || "",
                   username: username || "",
                   password: password || ""
@@ -1095,6 +1151,10 @@ interface LastInputDetails {
 
         const storyPromises = extractedStories.map(async (storyItem, storyIdx) => {
           let storyInput = `User Story Number: ${storyItem.storyNumber}\n`;
+          const targetWebsiteUrl = activeTab === 'url' ? analysisUrl.trim() : appUrl.trim();
+          if (targetWebsiteUrl) {
+            storyInput += `Target Website URL (analyze this application): ${targetWebsiteUrl}\n`;
+          }
           storyInput += `User Story Summary: ${storyItem.summary}\n`;
           if (storyItem.description) {
             storyInput += `User Story Description:\n${storyItem.description}\n`;
@@ -1119,6 +1179,8 @@ interface LastInputDetails {
             {
               aiInstructions,
               screenshots,
+              targetUrl: targetWebsiteUrl,
+              featureDescription: description.trim(),
               userStoryNumber: storyItem.storyNumber,
               userStorySummary: storyItem.summary
             }
@@ -1147,8 +1209,8 @@ interface LastInputDetails {
               title: s.title || `Verification for ${cleanUsSum}`,
               type: s.type || 'Functional',
               scenarioCategory: inferredCategory,
-              description: s.description || 'No description provided',
-              expectedResults: s.expectedResults || 'No expected results defined',
+              description: getScenarioText(s.description, s.scenarioDescription) || 'No description provided',
+              expectedResults: getScenarioText(s.expectedResults, s.expectedResult) || 'No expected results defined',
               moduleName: cleanUsSum || cleanUsNum,
               isApproved: false,
               testCases: [],
@@ -1211,7 +1273,9 @@ interface LastInputDetails {
       } else {
         let enrichedInput = finalInput;
         if (ragEnabled) {
-          const queryForRag = description || docContent || analysisUrl || (screenshots.length > 0 ? screenshots.map(s => s.name).join(' ') : '');
+          const queryForRag = activeTab === 'text'
+            ? [appUrl, description].filter(value => value?.trim()).join('\n')
+            : description || docContent || analysisUrl || (screenshots.length > 0 ? screenshots.map(s => s.name).join(' ') : '');
           if (queryForRag && queryForRag.trim()) {
             const enriched = await ragEnrichPrompt(queryForRag, project.id, 3);
             enrichedInput = `${enriched.prompt}\n\n${finalInput}`;
@@ -1229,7 +1293,9 @@ interface LastInputDetails {
           activeTab as any, 
           { 
             aiInstructions, 
-            screenshots,
+            screenshots: generationScreenshots,
+            targetUrl: activeTab === 'url' ? analysisUrl.trim() : activeTab === 'text' ? appUrl.trim() : '',
+            featureDescription: description.trim(),
             userStoryNumber: singleStory?.storyNumber || '',
             userStorySummary: singleStory?.summary || ''
           }
@@ -1256,8 +1322,8 @@ interface LastInputDetails {
             title: s.title || 'Untitled Scenario',
             type: s.type || 'Functional',
             scenarioCategory: inferredCategory,
-            description: s.description || 'No description provided',
-            expectedResults: s.expectedResults || 'No expected results defined',
+            description: getScenarioText(s.description, s.scenarioDescription) || 'No description provided',
+            expectedResults: getScenarioText(s.expectedResults, s.expectedResult) || 'No expected results defined',
             moduleName: s.moduleName || cleanUsSum || 'AI Generated',
             isApproved: false,
             testCases: [],
@@ -2031,10 +2097,6 @@ interface LastInputDetails {
       tombstonesToAdd.push(id, id.toLowerCase(), `folder-${id}`, `folder-${id.toLowerCase()}`);
       const s = scenarios.find(item => item.id === id);
       if (s) {
-        if (s.scenarioId && s.scenarioId !== 'SCENARIO_FOLDER') {
-          const scNorm = s.scenarioId.trim().toLowerCase();
-          tombstonesToAdd.push(s.scenarioId, scNorm);
-        }
         const isFolder = isScenarioFolder(s) || s.scenarioId === 'SCENARIO_FOLDER' || s.folderType === 'scenario';
         if (isFolder) {
           deletedFolderIds.push(id);
@@ -2051,15 +2113,14 @@ interface LastInputDetails {
       }
     });
 
-    addDeletedIds(tombstonesToAdd);
+    addDeletedIds(tombstonesToAdd, project.id);
     const tombstoneSet = new Set(tombstonesToAdd.map(t => t.toLowerCase()));
 
     const apiScenarios = (project.scenarios || []).filter(s => isApiTestingScenario(s));
 
     let updatedScenarios = scenarios.filter(s => 
       !selectedIds.has(s.id) && 
-      !tombstoneSet.has(s.id.toLowerCase()) && 
-      !(s.scenarioId && tombstoneSet.has(s.scenarioId.toLowerCase()))
+      !tombstoneSet.has(s.id.toLowerCase())
     );
     
     const deletedFolderIdSet = new Set(deletedFolderIds);
@@ -2076,8 +2137,7 @@ interface LastInputDetails {
 
     setNewlyGeneratedScenarios(prev => prev.filter(s => 
       !selectedIds.has(s.id) && 
-      !tombstoneSet.has(s.id.toLowerCase()) &&
-      !(s.scenarioId && tombstoneSet.has(s.scenarioId.toLowerCase()))
+      !tombstoneSet.has(s.id.toLowerCase())
     ));
 
     const existingDeleted = Array.isArray(project.deletedItemIds) ? project.deletedItemIds : [];
@@ -2130,10 +2190,6 @@ interface LastInputDetails {
     const isTargetFolder = Boolean(target && (isScenarioFolder(target) || target.scenarioId === 'SCENARIO_FOLDER' || target.folderType === 'scenario'));
 
     const tombstonesToAdd: string[] = [id, id.toLowerCase(), `folder-${id}`, `folder-${id.toLowerCase()}`];
-    if (target?.scenarioId && target.scenarioId !== 'SCENARIO_FOLDER') {
-      const scNorm = target.scenarioId.trim().toLowerCase();
-      tombstonesToAdd.push(target.scenarioId, scNorm);
-    }
     if (isTargetFolder && target?.title) {
       const tNorm = target.title.trim().toLowerCase();
       tombstonesToAdd.push(`folder-${target.title}`, `folder-${tNorm}`);
@@ -2147,7 +2203,7 @@ interface LastInputDetails {
       });
     }
 
-    addDeletedIds(tombstonesToAdd);
+    addDeletedIds(tombstonesToAdd, project.id);
     const tombstoneSet = new Set(tombstonesToAdd.map(t => t.toLowerCase()));
 
     const apiScenarios = (project.scenarios || []).filter(s => isApiTestingScenario(s));
@@ -2155,7 +2211,6 @@ interface LastInputDetails {
     let updatedScenarios = scenarios.filter(s => {
       if (s.id === id) return false;
       if (tombstoneSet.has(s.id.toLowerCase())) return false;
-      if (s.scenarioId && tombstoneSet.has(s.scenarioId.toLowerCase())) return false;
       if (isTargetFolder && s.scenarioId === 'SCENARIO_FOLDER' && target?.title && s.title?.trim().toLowerCase() === target.title.trim().toLowerCase()) {
         return false;
       }
@@ -2801,8 +2856,8 @@ interface LastInputDetails {
             setJobProgressPercent(100);
             setJobProgressStage('Test cases generated successfully.');
 
-            const generatedScenarios: TestScenario[] = (statusData.scenarios || []).map((s: any) => ({
-              ...s,
+            const generatedScenarios: TestScenario[] = (statusData.scenarios || []).map((raw: any) => ({
+              ...normalizeScenarioContent(raw),
               appUrl: appUrl || "",
               username: username || "",
               password: password || ""
