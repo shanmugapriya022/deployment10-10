@@ -1,0 +1,47 @@
+
+# AutomatiQA: GitHub -> Cloud Build -> Docker -> Artifact Registry -> Cloud Run
+
+substitutions:
+  _REGION: asia-south1
+  _REPOSITORY: automatiqa-images
+  _SERVICE: automatiqaproduction
+
+steps:
+  # Step 1: Build the Docker image
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:$COMMIT_SHA
+      - .
+
+  # Step 2: Push the image to Artifact Registry
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:$COMMIT_SHA
+
+  # Step 3: Deploy the image to Cloud Run
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:$COMMIT_SHA
+      - --region=${_REGION}
+      - --project=$PROJECT_ID
+      - --platform=managed
+      - --allow-unauthenticated
+      - --memory=4Gi
+      - --cpu=4
+      - --timeout=900
+      - --concurrency=10
+      - --set-secrets=GEMINI_API_KEY=GEMINI_API_KEY:latest
+      - --quiet
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:$COMMIT_SHA
+
+options:
+  logging: CLOUD_LOGGING_ONLY
