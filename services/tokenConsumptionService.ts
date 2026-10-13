@@ -1056,6 +1056,17 @@ export const isLogMatchingProject = (
   const lpStripped = lpNorm.replace(/^proj-/, '');
   const lpidStripped = lpidNorm.replace(/^proj-/, '');
 
+  // A project ID is authoritative. Do not charge usage to another project
+  // merely because both projects share a display name.
+  if (lpidNorm) {
+    return Boolean(
+      tIdNorm && (
+        lpidNorm === tIdNorm ||
+        lpidStripped === tIdStripped
+      )
+    );
+  }
+
   // 1. Direct ID matches
   if (tIdNorm) {
     if (
@@ -2299,7 +2310,9 @@ export const getProjectPlans = async (): Promise<ProjectPlan[]> => {
       if (!existing) {
         combinedMap.set(k, p);
       } else {
-        const isRenewal = p.lastRenewedAt && existing.lastRenewedAt && p.lastRenewedAt > existing.lastRenewedAt;
+        const isRenewal =
+          (p.cycleStartTimestamp || 0) > (existing.cycleStartTimestamp || 0) ||
+          Boolean(p.lastRenewedAt && (!existing.lastRenewedAt || p.lastRenewedAt > existing.lastRenewedAt));
 
         if (isRenewal) {
           combinedMap.set(k, p);

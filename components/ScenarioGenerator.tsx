@@ -2162,10 +2162,6 @@ interface LastInputDetails {
         const isFolder = isScenarioFolder(s) || s.scenarioId === 'SCENARIO_FOLDER' || s.folderType === 'scenario';
         if (isFolder) {
           deletedFolderIds.push(id);
-          if (s.title) {
-            const tNorm = s.title.trim().toLowerCase();
-            tombstonesToAdd.push(`folder-${s.title}`, `folder-${tNorm}`);
-          }
         }
         if (Array.isArray(s.testCases)) {
           s.testCases.forEach(tc => {
@@ -2252,10 +2248,6 @@ interface LastInputDetails {
     const isTargetFolder = Boolean(target && (isScenarioFolder(target) || target.scenarioId === 'SCENARIO_FOLDER' || target.folderType === 'scenario'));
 
     const tombstonesToAdd: string[] = [id, id.toLowerCase(), `folder-${id}`, `folder-${id.toLowerCase()}`];
-    if (isTargetFolder && target?.title) {
-      const tNorm = target.title.trim().toLowerCase();
-      tombstonesToAdd.push(`folder-${target.title}`, `folder-${tNorm}`);
-    }
     if (Array.isArray(target?.testCases)) {
       target.testCases.forEach(tc => {
         if (tc?.id) {
@@ -2273,9 +2265,6 @@ interface LastInputDetails {
     let updatedScenarios = scenarios.filter(s => {
       if (s.id === id) return false;
       if (tombstoneSet.has(s.id.toLowerCase())) return false;
-      if (isTargetFolder && s.scenarioId === 'SCENARIO_FOLDER' && target?.title && s.title?.trim().toLowerCase() === target.title.trim().toLowerCase()) {
-        return false;
-      }
       return true;
     });
 
@@ -2283,8 +2272,7 @@ interface LastInputDetails {
       const memberIds = new Set(target?.memberScenarioIds || []);
       updatedScenarios = updatedScenarios.map(s => {
         const isMember = memberIds.has(s.id) || 
-          s.folderId === id || 
-          (target?.title && (s.folderId === target.title || (s.folderName && s.folderName.trim().toLowerCase() === target.title.trim().toLowerCase())));
+          s.folderId === id;
         if (isMember) {
           return { ...s, folderId: "", folderName: "", testCaseFolderId: undefined, isRemovedFromIndividual: false };
         }

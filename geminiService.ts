@@ -559,35 +559,37 @@ async function clientProxy(functionName: string, args: any[]): Promise<any> {
           const pollStart = Date.now();
           while (Date.now() - pollStart < jobPollTimeoutMs) {
             await new Promise((resolve) => setTimeout(resolve, 1500));
+            let pollData: any;
             try {
               const pollRes = await fetch(`/api/ai/jobs/${data.jobId}`, {
                 signal: AbortSignal.timeout(10000)
               });
-              if (pollRes.ok) {
-                const pollData = await pollRes.json();
-                if (pollData.job?.status === 'COMPLETED') {
-                  let jobResult = pollData.job.result;
-                  if (jobResult && typeof jobResult === 'object' && 'result' in jobResult && jobResult.result !== undefined) {
-                    jobResult = jobResult.result;
-                  }
-                  if (cacheKey) {
-                    browserCache.set(cacheKey, { result: jobResult, timestamp: Date.now() });
-                  }
-                  if (pollData.job.logRecord && typeof window !== 'undefined') {
-                    addTokenLog(pollData.job.logRecord);
-                  }
-                  if (pollData.job.plan && typeof window !== 'undefined') {
-                    window.dispatchEvent(new CustomEvent('project-plan-updated', { detail: pollData.job.plan }));
-                  }
-                  return jobResult;
-                } else if (pollData.job?.status === 'FAILED') {
-                  throw new Error(pollData.job.error || 'AI Job failed.');
-                }
-              }
+              if (!pollRes.ok) continue;
+              pollData = await pollRes.json();
             } catch (pollErr: any) {
-              if (pollErr?.message && !pollErr.message.includes('fetch')) {
-                throw pollErr;
+              // A transient status request timeout does not mean the durable AI
+              // job failed. Keep polling; only a terminal job state ends wait.
+              console.warn(`[AI Job Queue] Status poll failed for ${data.jobId}; retrying`, pollErr?.message || pollErr);
+              continue;
+            }
+
+            if (pollData.job?.status === 'COMPLETED') {
+              let jobResult = pollData.job.result;
+              if (jobResult && typeof jobResult === 'object' && 'result' in jobResult && jobResult.result !== undefined) {
+                jobResult = jobResult.result;
               }
+              if (cacheKey) {
+                browserCache.set(cacheKey, { result: jobResult, timestamp: Date.now() });
+              }
+              if (pollData.job.logRecord && typeof window !== 'undefined') {
+                addTokenLog(pollData.job.logRecord);
+              }
+              if (pollData.job.plan && typeof window !== 'undefined') {
+                window.dispatchEvent(new CustomEvent('project-plan-updated', { detail: pollData.job.plan }));
+              }
+              return jobResult;
+            } else if (pollData.job?.status === 'FAILED') {
+              throw new Error(pollData.job.error || 'AI Job failed.');
             }
           }
           throw new Error("AI Job execution timed out in queue. Please retry in a moment.");
@@ -628,7 +630,10 @@ async function clientProxy(functionName: string, args: any[]): Promise<any> {
  */
 const PRIMARY_MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 const FALLBACK_MODEL = process.env.FALLBACK_MODEL_1 || 'gemini-3.1-flash-lite';
-const MODEL_CALL_TIMEOUT_MS = Math.max(30000, Number(process.env.GEMINI_MODEL_CALL_TIMEOUT_MS) || 180000);
+// Bound a single model call so a slow provider cannot leave generation buttons
+// spinning for several minutes. Feature generators can return their local
+// resilient fallback when this deadline is reached.
+const MODEL_CALL_TIMEOUT_MS = Math.max(30000, Number(process.env.GEMINI_MODEL_CALL_TIMEOUT_MS) || 90000);
 
 const withRetry = async (fn: (modelName: string) => Promise<any>, maxRetries = 2): Promise<any> => {
   let selectedModel = PRIMARY_MODEL;
@@ -656,12 +661,10 @@ const withRetry = async (fn: (modelName: string) => Promise<any>, maxRetries = 2
       const rawMsg = typeof error === 'string' ? error : (error?.message || String(error));
       const status = error?.status || error?.code;
 
-      // Retry one timed-out request on the fallback model, then fail clearly.
+      // A second full-duration model attempt after a timeout doubles the user's
+      // wait without improving a request that has already stalled. Let the
+      // feature-level resilient fallback handle the timeout instead.
       if (error?.code === 'GEMINI_MODEL_TIMEOUT') {
-        if (FALLBACK_MODEL && FALLBACK_MODEL !== selectedModel) {
-          selectedModel = FALLBACK_MODEL;
-          continue;
-        }
         throw error;
       }
 

@@ -11196,18 +11196,16 @@ async function syncProjectPlanFromFirestore(projectIdOrName: string, fallbackPro
 
   if (firestorePlan) {
     const localPlans = loadProjectPlansServer();
-    const idx = localPlans.findIndex(p => 
-      (p.projectId && firestorePlan && p.projectId.toLowerCase().trim() === firestorePlan.projectId.toLowerCase().trim()) || 
-      (p.projectName && firestorePlan && p.projectName.toLowerCase().trim() === firestorePlan.projectName.toLowerCase().trim())
-    );
+    const canonicalId = (id?: string) => (id || '').toLowerCase().trim().replace(/^proj-/, '');
+    let idx = localPlans.findIndex(p => canonicalId(p.projectId) && canonicalId(p.projectId) === canonicalId(firestorePlan?.projectId));
+    if (idx === -1 && !firestorePlan.projectId) {
+      idx = localPlans.findIndex(p => !p.projectId && p.projectName?.toLowerCase().trim() === firestorePlan?.projectName?.toLowerCase().trim());
+    }
     if (idx !== -1) {
       const mergedPlan = { ...localPlans[idx], ...firestorePlan };
       const isNewerCycle = (firestorePlan.cycleStartTimestamp || 0) > (localPlans[idx].cycleStartTimestamp || 0) ||
                            (firestorePlan.lastRenewedAt || 0) > (localPlans[idx].lastRenewedAt || 0);
-      if (!isNewerCycle && (localPlans[idx].consumedCredits ?? 0) > (firestorePlan.consumedCredits ?? 0)) {
-        mergedPlan.consumedCredits = localPlans[idx].consumedCredits;
-        mergedPlan.remainingCredits = Math.max(0, mergedPlan.allocatedCredits - (mergedPlan.consumedCredits ?? 0));
-      } else if (isNewerCycle) {
+      if (isNewerCycle) {
         mergedPlan.consumedCredits = 0;
         mergedPlan.remainingCredits = firestorePlan.allocatedCredits || mergedPlan.allocatedCredits;
       }
@@ -11364,7 +11362,10 @@ function getProjectCurrentCycleLogsServer(plan: ProjectPlanRecord): any[] {
     if (!log) return false;
     const logProjId = (log.projectId || '').toLowerCase().trim();
     const logProjName = (log.project || '').toLowerCase().trim();
-    const matchesProject = logProjId === pIdLower || logProjName === pNameLower || logProjName === pIdLower;
+    const targetId = pIdLower.replace(/^proj-/, '');
+    const matchesProject = logProjId
+      ? logProjId.replace(/^proj-/, '') === targetId
+      : logProjName === pNameLower || logProjName === pIdLower;
     if (!matchesProject) return false;
 
     const logTs = log.timestamp || 0;
@@ -12687,9 +12688,11 @@ async function recordTokenLogServer(params: {
             job.id,
             async () => {
               const startTime = Date.now();
-              const executionResult = await centralRateController.executeWithRateLimit(async () => {
-                return await func(...(args || []));
-              });
+              // AIJobManager already acquires/releases the shared limiter for
+              // each model attempt. Avoid wrapping it a second time here: the
+              // nested slot unnecessarily halves concurrency and can stall the
+              // entire queue when configured with a single worker.
+              const executionResult = await func(...(args || []));
               executionTimeMs = Date.now() - startTime;
               await aiCacheService.set(functionName, args || [], executionResult, executionTimeMs);
               return executionResult;
@@ -12810,6 +12813,9 @@ async function recordTokenLogServer(params: {
     }
 
     const targetProject = projectId || projectName || '27/07';
+    await syncProjectPlanFromFirestore(targetProject, projectName).catch(syncErr => {
+      console.warn('[gemini/generate-user-stories] Firestore plan refresh notice:', syncErr?.message || syncErr);
+    });
     const creditCheck = checkProjectCreditsServer(targetProject, 'AI User stories generation', 'AI_ANALYSIS', projectName, planType);
     if (!creditCheck.allowed) {
       return res.status(403).json({

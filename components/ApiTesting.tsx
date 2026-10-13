@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { generateScenariosFromApiResponse, buildFallbackApiScenarios, isCreditLimitError } from '../geminiService';
 import { logActivity } from '../services/activityService';
 import { canPerformAction, deductExportCredits, deductProjectCredits } from '../services/creditService';
+import { addDeletedIds } from '../services/projectService';
 import { ragEnrichPrompt, indexSingleItem } from '../services/ragService';
 import { RAGStatusBadge } from './RAGStatusBadge';
 import { VectorSearchResult } from '../types';
@@ -1581,9 +1582,14 @@ const ApiTesting: React.FC<ApiTestingProps> = ({ project, user, onUpdateProject 
       updatedWorkspaces = updatedWorkspaces.map(ws => ({ ...ws, requests: (ws.requests || []).filter(r => r.id !== id), collections: ws.collections.map(col => ({ ...col, requests: col.requests.filter(r => r.id !== id), folders: (col.folders || []).map(f => ({ ...f, requests: f.requests.filter(r => r.id !== id) })) })) }));
     }
 
+    // Record the deletion before updating state so stale snapshots and durable
+    // backup merges cannot silently restore a workspace the user removed.
+    addDeletedIds([id], currentProj.id);
+    const deletedItemIds = Array.from(new Set([...(currentProj.deletedItemIds || []), id]));
+
     const updatedHistory = (currentProj.apiHistory || []).filter(h => h.id !== id);
 
-    onUpdateProject({ ...currentProj, apiWorkspaces: updatedWorkspaces, apiHistory: updatedHistory });
+    onUpdateProject({ ...currentProj, apiWorkspaces: updatedWorkspaces, apiHistory: updatedHistory, deletedItemIds, deletedItemIdsVersion: 2 });
     if (selectedRequestId === id) { setSelectedRequestId(null); setResponse(null); }
     logActivity(user.email, user.name, `Deleted API artifact: ${type} - ${id}`, currentProj.id, currentProj.name);
     setDeleteConfirmation(null);

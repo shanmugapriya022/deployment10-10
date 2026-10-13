@@ -632,7 +632,9 @@ export async function deleteFolderFromFirestore(projectId: string, folderId: str
         const currentAutoFolders = (Array.isArray(projData.automationFolders) ? projData.automationFolders : []).filter((f: any) => f.id !== folderId);
 
         const existingDeleted = Array.isArray(projData.deletedItemIds) ? projData.deletedItemIds : [];
-        const nextDeleted = Array.from(new Set([...existingDeleted, folderId, `folder-${folderId}`, targetTitle].filter(Boolean)));
+        // Tombstones must identify records by ID. A folder title can also be
+        // used by an unrelated scenario/test-case folder in the same project.
+        const nextDeleted = Array.from(new Set([...existingDeleted, folderId, `folder-${folderId}`].filter(Boolean)));
 
         await syncUpdateDoc(projectDocRef, {
           userStories: nextStories,

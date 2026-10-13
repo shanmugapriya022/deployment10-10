@@ -1044,26 +1044,17 @@ export const mergeScenariosWithBackup = (
     expectedResults: getScenarioText(scenario.expectedResults, scenario.expectedResult)
   });
 
-  const isItemDeleted = (id?: string, title?: string, isFolder?: boolean) => {
+  const isItemDeleted = (id?: string) => {
     if (!id) return true;
     const lowerId = id.trim().toLowerCase();
-    if (deletedIds.has(id) || deletedIds.has(lowerId) || deletedIds.has(`folder-${id}`) || deletedIds.has(`folder-${lowerId}`)) {
-      return true;
-    }
-    if (isFolder && title) {
-      const lowerTitle = title.trim().toLowerCase();
-      if (deletedIds.has(`folder-${lowerTitle}`)) {
-        return true;
-      }
-    }
-    return false;
+    return deletedIds.has(id) || deletedIds.has(lowerId) || deletedIds.has(`folder-${id}`) || deletedIds.has(`folder-${lowerId}`);
   };
 
   const scenarioMap = new Map<string, any>();
 
   // 1. Index firestore scenarios
   firestoreScenarios.forEach(s => {
-    if (s && s.id && !isItemDeleted(s.id, s.title, s.isFolder || s.scenarioId === 'SCENARIO_FOLDER')) {
+    if (s && s.id && !isItemDeleted(s.id)) {
       scenarioMap.set(s.id, normalizeScenarioContent(s));
     }
   });
@@ -1071,7 +1062,7 @@ export const mergeScenariosWithBackup = (
   // Helper to overlay scenarios from backup sources
   const overlayScenarios = (list: any[]) => {
     list.forEach(bs => {
-      if (!bs || !bs.id || isItemDeleted(bs.id, bs.title, bs.isFolder || bs.scenarioId === 'SCENARIO_FOLDER')) return;
+      if (!bs || !bs.id || isItemDeleted(bs.id)) return;
 
       bs = normalizeScenarioContent(bs);
       const existing = scenarioMap.get(bs.id);
@@ -1169,8 +1160,7 @@ export const mergeScenariosWithBackup = (
     if (s.folderId) {
       const isFolderDead = deletedIds.has(s.folderId) || 
         deletedIds.has(s.folderId.toLowerCase()) || 
-        deletedIds.has(`folder-${s.folderId.toLowerCase()}`) ||
-        (s.folderName && (deletedIds.has(s.folderName) || deletedIds.has(s.folderName.trim().toLowerCase())));
+        deletedIds.has(`folder-${s.folderId.toLowerCase()}`);
 
       if (isFolderDead || !folderMap.has(s.folderId)) {
         s.folderId = "";

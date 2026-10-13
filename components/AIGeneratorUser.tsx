@@ -80,6 +80,24 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
   const [retrievedRagChunks, setRetrievedRagChunks] = useState<VectorSearchResult[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  useEffect(() => {
+    const clearResolvedCreditError = (event: Event) => {
+      const detail = (event as CustomEvent<any>).detail;
+      if (detail?.projectId && detail.projectId !== project.id) return;
+      const summary = getProjectCreditSummary(project.id, project.name);
+      if (!summary.isExpired && summary.remainingCredits >= 5) {
+        setCreditNotAvailableError(null);
+      }
+    };
+
+    window.addEventListener('project-plan-updated', clearResolvedCreditError);
+    window.addEventListener('token-consumption-updated', clearResolvedCreditError);
+    return () => {
+      window.removeEventListener('project-plan-updated', clearResolvedCreditError);
+      window.removeEventListener('token-consumption-updated', clearResolvedCreditError);
+    };
+  }, [project.id, project.name]);
+
   // Search and Filter State
   const [searchQuery, setSearchQuery] = useState('');
   

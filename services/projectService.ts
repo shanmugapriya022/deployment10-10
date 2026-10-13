@@ -459,7 +459,6 @@ export const cleanProjectDeletedItems = (project: any): any => {
       if (id) {
         deleted.add(id);
         deleted.add(id.toLowerCase());
-        deleted.add(`folder-${id}`);
       }
   });
 
@@ -497,20 +496,13 @@ export const cleanProjectDeletedItems = (project: any): any => {
       .filter((s: any) => {
         if (!s || !s.id) return false;
         const sId = String(s.id).toLowerCase().trim();
-        const titleNorm = s.title ? String(s.title).toLowerCase().trim() : '';
         if (
           deleted.has(s.id) ||
           deleted.has(sId) ||
           deleted.has(`folder-${s.id}`) ||
-          deleted.has(`folder-${sId}`) ||
-          (titleNorm && (deleted.has(s.title) || deleted.has(titleNorm)))
+          deleted.has(`folder-${sId}`)
         ) {
           return false;
-        }
-        const isFolder = s.isFolder || s.scenarioId === 'SCENARIO_FOLDER' || s.scenarioId === 'TESTCASE_FOLDER' || s.folderType === 'scenario';
-        if (isFolder && s.title) {
-          const tNorm = s.title.trim().toLowerCase();
-          if (deleted.has(s.title) || deleted.has(tNorm) || deleted.has(`folder-${tNorm}`)) return false;
         }
         return true;
       })
@@ -522,8 +514,7 @@ export const cleanProjectDeletedItems = (project: any): any => {
           );
         }
         const isFolderDeleted = 
-          (updated.folderId && (deleted.has(updated.folderId) || deleted.has(updated.folderId.toLowerCase()) || deleted.has(`folder-${updated.folderId.toLowerCase()}`))) ||
-          (updated.folderName && (deleted.has(updated.folderName) || deleted.has(updated.folderName.trim().toLowerCase()) || deleted.has(`folder-${updated.folderName.trim().toLowerCase()}`)));
+          (updated.folderId && (deleted.has(updated.folderId) || deleted.has(updated.folderId.toLowerCase()) || deleted.has(`folder-${updated.folderId.toLowerCase()}`)));
         
         if (isFolderDeleted) {
           updated.folderId = "";
@@ -1566,10 +1557,8 @@ export const saveScenariosToFirestore = async (
     existingRecords.docs.forEach(snapshot => {
       const record = snapshot.data();
       const id = String(record.id || snapshot.id);
-      const title = String(record.title || "");
       if (
-        deleted.has(id.trim().toLowerCase()) ||
-        (title && deleted.has(`folder-${title.trim().toLowerCase()}`))
+        deleted.has(id.trim().toLowerCase())
       ) {
         operations.push(batch => batch.delete(snapshot.ref));
       }
@@ -1686,6 +1675,37 @@ export const updateProjectFirestore = async (projectId: string, data: any, optio
           } catch (retryErr: any) {
             console.warn('[Firestore Write Recovery 2] Ultra-pruning write failed, saving core project skeleton to Firestore...', retryErr);
             try {
+              // Keep API Testing workspaces in the minimal recovery document.
+              // The previous skeleton omitted this repository, so an oversized
+              // project could lose its Firestore copy of a workspace when a
+              // browser/server backup was unavailable.
+              const compactApiRequest = (request: any) => {
+                const compact = { ...request };
+                for (const field of ['body', 'preRequestScript', 'postResponseScript', 'description', 'expectedResults', 'refineInstructions']) {
+                  if (typeof compact[field] === 'string' && compact[field].length > 5000) {
+                    compact[field] = compact[field].slice(0, 5000) + '… [trimmed in Firestore recovery copy]';
+                  }
+                }
+                if (compact.savedResponse && estimateSize(compact.savedResponse.data) > 10000) {
+                  compact.savedResponse = {
+                    ...compact.savedResponse,
+                    data: '[Response body is preserved in the project backup.]'
+                  };
+                }
+                return compact;
+              };
+              const compactApiWorkspaces = (finalizedData.apiWorkspaces || []).map((workspace: any) => ({
+                ...workspace,
+                requests: (workspace.requests || []).map(compactApiRequest),
+                collections: (workspace.collections || []).map((collection: any) => ({
+                  ...collection,
+                  requests: (collection.requests || []).map(compactApiRequest),
+                  folders: (collection.folders || []).map((folder: any) => ({
+                    ...folder,
+                    requests: (folder.requests || []).map(compactApiRequest)
+                  }))
+                }))
+              }));
               // Save core project skeleton to Firestore without merge (all heavy data is already saved on server disk & local storage)
               const minimalDoc: Record<string, any> = {
                 id: projectId,
@@ -1726,6 +1746,7 @@ export const updateProjectFirestore = async (projectId: string, data: any, optio
                   createdAt: f.createdAt,
                   stepsCount: (f.steps || []).length
                 })),
+                apiWorkspaces: compactApiWorkspaces,
                 scenarios: [],
                 updatedAt: serverTimestamp()
               };
