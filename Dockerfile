@@ -1,4 +1,3 @@
-```dockerfile
 # syntax=docker/dockerfile:1
 
 # ==============================================================================
@@ -126,4 +125,3 @@ HEALTHCHECK --interval=30s \
 # Start Production Server
 # ==============================================================================
 CMD ["node", "dist/server.cjs"]
-```
