@@ -1843,7 +1843,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
     setSelectedScriptIds(next);
   };
 
-  const handleConfirmBulkDeleteScripts = () => {
+  const handleConfirmBulkDeleteScripts = async () => {
     if (selectedScriptIds.size === 0) return;
     const count = selectedScriptIds.size;
     const idsToDelete = Array.from(selectedScriptIds);
@@ -1863,7 +1863,12 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
       localStorage.setItem(`automatiqa_project_backup_${project.id}`, JSON.stringify(updatedProject));
     } catch (e) {}
 
-    onUpdateProject(updatedProject);
+    try {
+      await Promise.resolve(onUpdateProject(updatedProject));
+    } catch (err) {
+      toast.error('Could not delete the selected scripts. Please try again.');
+      return;
+    }
     setSelectedScriptIds(new Set());
     setShowBulkDeleteScriptsConfirm(false);
     toast.success(`Deleted ${count} script${count > 1 ? 's' : ''} from repository`);
@@ -2646,9 +2651,6 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
       source: 'script_generator'
     };
 
-    // Remove from unsaved scripts
-    setUnsavedScripts(prev => prev.filter(s => s.id !== script.id));
-
     // Save into project automation scripts
     const existingIndex = (project.automationScripts || []).findIndex(s => s.id === script.id || s.id === savedScriptObj.id);
     let updatedScripts: AutomationScript[];
@@ -2687,7 +2689,13 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
       localStorage.setItem(`automatiqa_project_backup_${project.id}`, JSON.stringify(updatedProject));
     } catch (e) {}
 
-    onUpdateProject(updatedProject);
+    try {
+      await Promise.resolve(onUpdateProject(updatedProject));
+    } catch (err) {
+      toast.error('Could not save the script. Please try again.');
+      return;
+    }
+    setUnsavedScripts(prev => prev.filter(s => s.id !== script.id));
 
     // Make sure the destination folder is expanded in Script Folders tab or Imported tab
     setExpandedScriptFolders(prev => new Set([...prev, finalFolderName]));

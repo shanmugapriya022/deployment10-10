@@ -85,7 +85,7 @@ export const PAID_PLAN = {
   },
 
   RECORD_PLAY_WEB: {
-    analysis: 100,
+    analysis: 50,
     downloadCopy: 50
   },
 
@@ -178,7 +178,7 @@ export const FEATURE_CREDIT_RULES: Record<string, FeatureCreditRule> = {
     featureKey: 'record_play_web',
     displayName: 'Automation - Record and play - Web app',
     trial: { analysis: 100, export: 50 },
-    paid: { analysis: 100, export: 50 },
+    paid: { analysis: 50, export: 50 },
     description: 'Record user interactions on Web browser, generate automation scripts and assertions. Export/download scripts.'
   },
   record_play_video_analysis: {
@@ -618,9 +618,7 @@ export const deductExportCredits = async (
     : (lowerOutput.includes('download') || lowerOutput.includes('excel') || lowerOutput.includes('csv') || lowerOutput.includes('xlsx')) ? 'download'
     : 'export';
 
-  const check = canPerformActionLocal(projectId || 'proj-default', featureKey, effectiveActionType, projectName);
-  const plan = getProjectPlanSync(projectId, projectName);
-  const isPaid = plan?.planType === 'Paid' || plan?.allocatedCredits >= 1000;
+  const check = await canPerformAction(projectId || 'proj-default', featureKey, effectiveActionType, projectName);
 
   // Block action if credit validation fails
   if (!check.allowed) {
@@ -641,11 +639,14 @@ export const deductExportCredits = async (
       toast.success(`${outputType} successful! ${res.deducted} credits deducted. Remaining: ${res.remainingCredits}`);
     } else {
       console.warn(`[creditService] Export credit notice:`, res.error);
+      toast.error(res.error || `Could not deduct credits for ${outputType}.`);
+      return false;
     }
-    return true;
+    return res.success;
   } catch (err: any) {
     console.warn(`[creditService] Export error:`, err);
-    return true;
+    toast.error(`Could not verify or deduct credits for ${outputType}. Please retry.`);
+    return false;
   }
 };
 

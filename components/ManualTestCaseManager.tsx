@@ -37,6 +37,7 @@ import { loadXlsxWorkbook, worksheetToJson } from '../utils/spreadsheetUtils';
 import { toast } from 'sonner';
 import { logActivity } from '../services/activityService';
 import { generateUniqueFolderId } from '../utils/idGenerator';
+import { deductExportCredits } from '../services/creditService';
 
 interface ManualTestCaseManagerProps {
   project: Project;
@@ -1094,15 +1095,19 @@ const ManualTestCaseManager: React.FC<ManualTestCaseManagerProps> = ({ project, 
       return c;
     });
 
-    // Close the popup immediately upon clicking Save
+    try {
+      await Promise.resolve(onUpdateProject({ ...project, scenarios: updatedScenarios, manualTestCases: updatedManualCases }));
+    } catch (err) {
+      toast.error('Could not save the functional test case folder. Please try again.');
+      return;
+    }
+
     setIsFolderModalOpen(false);
     setNewFolderName('');
     setSelectedCaseIds(new Set());
     setEditingFolderId(null);
     setFolderError(null);
     setActiveTab('folders');
-
-    onUpdateProject({ ...project, scenarios: updatedScenarios, manualTestCases: updatedManualCases });
 
     try {
       await logActivity(user.email, user.name, `${editingFolderId ? 'Updated' : 'Created'} Functional Folder: ${trimmedName}`, project.id, project.name);
@@ -1270,6 +1275,7 @@ const ManualTestCaseManager: React.FC<ManualTestCaseManagerProps> = ({ project, 
       toast.error('No functional test cases available to export');
       return;
     }
+    if (!await deductExportCredits(project.id, 'ai_test_cases', user, `Download Functional Test Cases (${format.toUpperCase()})`, project.name)) return;
 
     const data = manualCases.map(tc => ({
       'Test Case ID': tc.testCaseId || 'N/A',
@@ -1319,6 +1325,7 @@ const ManualTestCaseManager: React.FC<ManualTestCaseManagerProps> = ({ project, 
       toast.error(`Folder "${folder.title}" has no test cases to export`);
       return;
     }
+    if (!await deductExportCredits(project.id, 'ai_test_cases', user, `Download Functional Test Case Folder (${format.toUpperCase()})`, project.name)) return;
 
     const data = folder.testCases.map((tc, idx) => ({
       '#': idx + 1,
@@ -1347,6 +1354,7 @@ const ManualTestCaseManager: React.FC<ManualTestCaseManagerProps> = ({ project, 
 
   const handleDownloadSingleCase = async (tc: TestCase, folderTitle: string, format: 'excel' | 'csv' = 'excel', e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
+    if (!await deductExportCredits(project.id, 'ai_test_cases', user, `Download Functional Test Case (${format.toUpperCase()})`, project.name)) return;
 
     const data = [{
       'Test Case ID': tc.testCaseId || tc.id,
@@ -1378,6 +1386,7 @@ const ManualTestCaseManager: React.FC<ManualTestCaseManagerProps> = ({ project, 
       toast.error('No test cases selected for download');
       return;
     }
+    if (!await deductExportCredits(project.id, 'ai_test_cases', user, `Download Selected Functional Test Cases (${format.toUpperCase()})`, project.name)) return;
 
     const data = selected.map((tc, idx) => ({
       '#': idx + 1,

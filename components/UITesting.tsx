@@ -5214,14 +5214,14 @@ ${bodyHtml}
       setHydratedReports(updatedReports);
       setHydratedInputs(updatedInputs);
 
-      onUpdateProject({
+      await Promise.resolve(onUpdateProject({
         ...project,
         uiTestingFolders: folders,
         uiTestingReports: updatedReports,
         figmaDesignReviews: savedFigmaReviews,
         uiComparisonReports: savedComparisonReports,
         uiTestingInputs: updatedInputs
-      });
+      }));
 
       if (targetFolderId) {
         setSelectedFolderId(targetFolderId);
@@ -5360,14 +5360,14 @@ ${bodyHtml}
       setHydratedFigmaReviews(updatedReviews);
       setHydratedInputs(updatedInputs);
 
-      onUpdateProject({
+      await Promise.resolve(onUpdateProject({
         ...project,
         uiTestingFolders: folders,
         uiTestingReports: savedReports,
         figmaDesignReviews: updatedReviews,
         uiComparisonReports: savedComparisonReports,
         uiTestingInputs: updatedInputs
-      });
+      }));
 
       if (targetFolderId) {
         setSelectedFolderId(targetFolderId);
@@ -5523,14 +5523,14 @@ ${bodyHtml}
       setHydratedComparisonReports(updatedComparisons);
       setHydratedInputs(updatedInputs);
 
-      onUpdateProject({
+      await Promise.resolve(onUpdateProject({
         ...project,
         uiTestingFolders: folders,
         uiTestingReports: savedReports,
         figmaDesignReviews: savedFigmaReviews,
         uiComparisonReports: updatedComparisons,
         uiTestingInputs: updatedInputs
-      });
+      }));
 
       if (targetFolderId) {
         setSelectedFolderId(targetFolderId);

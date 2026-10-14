@@ -2019,7 +2019,7 @@ interface LastInputDetails {
       const fullScenariosList = [...updatedScenariosList, ...apiScenarios];
 
       // Update the project
-      onUpdateProject({ ...project, scenarios: fullScenariosList });
+      await Promise.resolve(onUpdateProject({ ...project, scenarios: fullScenariosList }, { immediate: true }));
       try {
         localStorage.setItem(`automatiqa_project_backup_${project.id}`, JSON.stringify({ ...project, scenarios: fullScenariosList }));
       } catch (err) {}
@@ -2367,9 +2367,10 @@ interface LastInputDetails {
 
   const handleDownloadRepository = async (format: 'excel' | 'csv' = 'excel') => {
     try {
-      await deductExportCredits(project.id, 'ai_scenarios', user, `Export Scenarios Repository (${format.toUpperCase()})`, project.name);
+      if (!await deductExportCredits(project.id, 'ai_scenarios', user, `Export Scenarios Repository (${format.toUpperCase()})`, project.name)) return;
     } catch (err) {
       console.warn('Credit check warning:', err);
+      return;
     }
 
     const approvedScenarios = scenarios.filter(s => s.isApproved && !['SCENARIO_FOLDER', 'TESTCASE_FOLDER', 'MANUAL_FOLDER'].includes(s.scenarioId));
@@ -2644,9 +2645,10 @@ interface LastInputDetails {
     if (e) e.stopPropagation();
 
     try {
-      await deductExportCredits(project.id, 'ai_scenarios', user, `Export Folder (${folder.title}) [${format.toUpperCase()}]`, project.name);
+      if (!await deductExportCredits(project.id, 'ai_scenarios', user, `Export Folder (${folder.title}) [${format.toUpperCase()}]`, project.name)) return;
     } catch (err) {
       console.warn('Credit check warning:', err);
+      return;
     }
     
     const memberIds = new Set(folder.memberScenarioIds || []);
@@ -2686,9 +2688,10 @@ interface LastInputDetails {
     if (e) e.stopPropagation();
 
     try {
-      await deductExportCredits(project.id, 'ai_scenarios', user, `Export Scenarios (${userStoryNum}) [${format.toUpperCase()}]`, project.name);
+      if (!await deductExportCredits(project.id, 'ai_scenarios', user, `Export Scenarios (${userStoryNum}) [${format.toUpperCase()}]`, project.name)) return;
     } catch (err) {
       console.warn('Credit check warning:', err);
+      return;
     }
     
     const validMembers = members.filter(s => s.scenarioId !== 'INPUT_SOURCE');
@@ -2729,9 +2732,10 @@ interface LastInputDetails {
   const handleDownloadSingleScenario = async (scenario: TestScenario, format: 'excel' | 'csv' = 'excel', e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     try {
-      await deductExportCredits(project.id, 'ai_scenarios', user, `Export Scenario (${scenario.scenarioId || scenario.title})`, project.name);
+      if (!await deductExportCredits(project.id, 'ai_scenarios', user, `Export Scenario (${scenario.scenarioId || scenario.title})`, project.name)) return;
     } catch (err) {
       console.warn('Credit check warning:', err);
+      return;
     }
     const scPassword = scenario.password || password;
     const row = [{
@@ -2761,9 +2765,10 @@ interface LastInputDetails {
       return;
     }
     try {
-      await deductExportCredits(project.id, 'ai_scenarios', user, `Export Selected Scenarios (${format.toUpperCase()})`, project.name);
+      if (!await deductExportCredits(project.id, 'ai_scenarios', user, `Export Selected Scenarios (${format.toUpperCase()})`, project.name)) return;
     } catch (err) {
       console.warn('Credit check warning:', err);
+      return;
     }
     const rows = checked.map((s, idx) => {
       const scPassword = s.password || password;
@@ -3235,7 +3240,7 @@ interface LastInputDetails {
       const fullScenariosList = [...updatedScenariosList, ...apiScenarios];
 
       // Update the project
-      onUpdateProject({ ...project, scenarios: fullScenariosList });
+      await Promise.resolve(onUpdateProject({ ...project, scenarios: fullScenariosList }, { immediate: true }));
 
       // Update the newlyGeneratedScenarios state to reflect saved status
       setNewlyGeneratedScenarios(prev => prev.map(s => targetIdSet.has(s.id) ? ({

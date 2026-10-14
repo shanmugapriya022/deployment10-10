@@ -270,7 +270,7 @@ export const CreditConsumption: React.FC<CreditConsumptionProps> = ({ currentUse
     if (validAcc?.name) return validAcc.name;
     const validProj = projects.find(p => p.name && p.name !== '27/07');
     if (validProj?.name) return validProj.name;
-    return 'Project - Pradee';
+    return 'All';
   });
 
   // Sync selectedProject when activeProject loads or changes
@@ -284,6 +284,13 @@ export const CreditConsumption: React.FC<CreditConsumptionProps> = ({ currentUse
       });
     }
   }, [activeProject?.name, projects]);
+
+  useEffect(() => {
+    if (!isSuperAdmin || selectedProject === 'All') return;
+    if (!projects.some(p => p.name === selectedProject || p.id === selectedProject)) {
+      setSelectedProject('All');
+    }
+  }, [isSuperAdmin, selectedProject, projects]);
 
   // Keep selectedProject strictly locked to adminParticularProject for Admin role
   useEffect(() => {
@@ -336,7 +343,7 @@ export const CreditConsumption: React.FC<CreditConsumptionProps> = ({ currentUse
   // Simulation form states
   const [simFeature, setSimFeature] = useState<string>(AUTOMATIQA_MODULES[0].name);
   const [simProject, setSimProject] = useState<string>(
-    accessibleProjects[0]?.name || activeProject?.name || projects[0]?.name || 'Global Retail Banking App'
+    accessibleProjects[0]?.name || activeProject?.name || projects[0]?.name || ''
   );
   const [simUserStoryId, setSimUserStoryId] = useState('US-101');
   const [simModality, setSimModality] = useState<'Text' | 'Screenshot' | 'Video' | 'Document' | 'URL' | 'Multimodal'>('Multimodal');
@@ -511,18 +518,9 @@ export const CreditConsumption: React.FC<CreditConsumptionProps> = ({ currentUse
       return adminParticularProject?.name ? [adminParticularProject.name] : [];
     }
     const set = new Set<string>();
-    accessibleProjects.forEach(p => { if (p.name && p.name !== '27/07') set.add(p.name); });
     projects.forEach(p => { if (p.name && p.name !== '27/07') set.add(p.name); });
-    authorizedLogs.forEach(l => {
-      const displayName = getProjectDisplayName(l, projects);
-      if (displayName && displayName !== 'Default Project' && displayName !== '27/07') {
-        set.add(displayName);
-      } else if (l.project && l.project !== 'Default Project' && l.project !== '27/07') {
-        set.add(l.project);
-      }
-    });
-    return ['All', ...Array.from(set)];
-  }, [isSuperAdmin, adminParticularProject, projects, authorizedLogs, accessibleProjects]);
+    return ['All', ...Array.from(set).sort((a, b) => a.localeCompare(b))];
+  }, [isSuperAdmin, adminParticularProject, projects]);
 
   // Scoped members for selected project
   const scopedMembers = useMemo(() => {
@@ -796,14 +794,31 @@ export const CreditConsumption: React.FC<CreditConsumptionProps> = ({ currentUse
 
   // Filter subscription requests according to authorized members & accessible projects
   const visibleSubscriptionRequests = useMemo(() => {
-    if (isSuperAdmin) return subscriptionRequests;
-    const targetProjName = (adminParticularProject?.name || '').toLowerCase().trim();
-    const targetProjId = (adminParticularProject?.id || '').toLowerCase().trim();
-    return subscriptionRequests.filter(r => {
-      const pIdLower = (r.projectId || '').toLowerCase().trim();
-      const pNameLower = (r.projectName || '').toLowerCase().trim();
-      return (targetProjId && pIdLower === targetProjId) || (targetProjName && pNameLower === targetProjName);
-    });
+    const scopedRequests = isSuperAdmin ? subscriptionRequests : (() => {
+      const targetProjName = (adminParticularProject?.name || '').toLowerCase().trim();
+      const targetProjId = (adminParticularProject?.id || '').toLowerCase().trim();
+      return subscriptionRequests.filter(r => {
+        const pIdLower = (r.projectId || '').toLowerCase().trim();
+        const pNameLower = (r.projectName || '').toLowerCase().trim();
+        return (targetProjId && pIdLower === targetProjId) || (targetProjName && pNameLower === targetProjName);
+      });
+    })();
+
+    // Collapse copies created by older clients that wrote a project request
+    // through multiple storage paths during the same action.
+    const unique: SubscriptionRequest[] = [];
+    for (const request of [...scopedRequests].sort((a, b) => (b.requestedAt || 0) - (a.requestedAt || 0))) {
+      const project = (request.projectId || request.projectName || '').toLowerCase().trim();
+      const user = (request.userEmail || request.requestedByUserEmail || '').toLowerCase().trim();
+      const duplicate = unique.some(existing =>
+        project === (existing.projectId || existing.projectName || '').toLowerCase().trim() &&
+        user === (existing.userEmail || existing.requestedByUserEmail || '').toLowerCase().trim() &&
+        request.status?.toLowerCase() === existing.status?.toLowerCase() &&
+        Math.abs((request.requestedAt || 0) - (existing.requestedAt || 0)) <= 2 * 60 * 1000
+      );
+      if (!duplicate) unique.push(request);
+    }
+    return unique;
   }, [isSuperAdmin, subscriptionRequests, adminParticularProject]);
 
   // Current user's credit status
@@ -836,7 +851,7 @@ export const CreditConsumption: React.FC<CreditConsumptionProps> = ({ currentUse
     if (validAcc?.name) return validAcc.name;
     const validProj = projects.find(p => p.name && p.name !== '27/07');
     if (validProj?.name) return validProj.name;
-    return 'Project - Pradee';
+    return projects.find(p => p.name && p.name !== '27/07')?.name || 'All';
   }, [isSuperAdmin, adminParticularProject, selectedProject, activeProject, accessibleProjects, projects]);
 
   const currentProjectObj = useMemo(() => {
@@ -906,7 +921,7 @@ export const CreditConsumption: React.FC<CreditConsumptionProps> = ({ currentUse
   // All project summaries for Project Plan Management across accessible projects
   const allProjectSummaries = useMemo(() => {
     const targetProjects = isSuperAdmin
-      ? (accessibleProjects.length > 0 ? accessibleProjects : (projects.length > 0 ? projects : [{ id: 'proj-1', name: 'Global Retail Banking App' } as any]))
+      ? (accessibleProjects.length > 0 ? accessibleProjects : projects)
       : (adminParticularProject ? [adminParticularProject] : accessibleProjects);
     return targetProjects.map(proj => getProjectCreditSummary(proj.id, proj.name, logs));
   }, [isSuperAdmin, accessibleProjects, projects, adminParticularProject, logs, projectPlansVersion]);
@@ -980,7 +995,7 @@ export const CreditConsumption: React.FC<CreditConsumptionProps> = ({ currentUse
     const currentSummary = getProjectCreditSummary(projectId, projName);
     const isExceeded = currentSummary.usedCredits >= currentSummary.totalPool || currentSummary.remainingCredits <= 0;
     const isExpired = currentSummary.isExpired;
-    if (!isExceeded && !isExpired) {
+    if (!isSuperAdmin && !isExceeded && !isExpired) {
       const warningMsg = `⚠️ Plan for project "${projName}" is locked and cannot be changed while credits remain active (${currentSummary.usedCredits}/${currentSummary.totalPool} used). You can renew or change the plan once the credit limit is exceeded or validity has expired.`;
       toast.warning(warningMsg);
       setActionSuccessMessage(warningMsg);

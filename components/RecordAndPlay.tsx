@@ -8708,8 +8708,11 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
                             <Download size={14} />
                           </button>
                           <button 
-                            onClick={() => {
-                              navigator.clipboard.writeText(formattedCode);
+                            onClick={async () => {
+                              const featureKey = (platform as string) === 'mobile' ? 'record_play_mobile' : 'record_play_web';
+                              const allowed = await deductExportCredits(project.id, featureKey, user, 'Copy Recorded Script File', project.name);
+                              if (!allowed) return;
+                              await navigator.clipboard.writeText(formattedCode);
                               toast.success('File content copied');
                             }}
                             className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"

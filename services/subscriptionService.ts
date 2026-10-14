@@ -257,6 +257,24 @@ export const createSubscriptionRequest = async (
       : 'Exceeded credit limit. Requested subscription re-enablement.')
   };
 
+  // Project requests are persisted by the project-plan API, which also updates
+  // the plan's pending state. Avoid writing a second client-generated record.
+  if (pId) {
+    try {
+      const response = await fetch(`/api/credits/project-plan/${encodeURIComponent(pId)}/request-subscription`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requestedPlanType: planReq, userEmail: cleanEmail, userName: userName || cleanEmail.split('@')[0], projectName: pName, message: requestObj.notes })
+      });
+      const result = await response.json();
+      if (response.ok && result.request) Object.assign(requestObj, result.request);
+      else if (!response.ok && !/already pending/i.test(result.error || '')) throw new Error(result.error || 'Failed to submit request');
+    } catch (err) {
+      console.warn("Backend project subscription request warning:", err);
+      throw err;
+    }
+  }
+
   // 1. Save locally
   const currentRequests = getLocalSubscriptionRequests();
   const existingIdx = currentRequests.findIndex(r => {
@@ -273,30 +291,13 @@ export const createSubscriptionRequest = async (
   }
   saveLocalSubscriptionRequests(currentRequests);
 
-  // 2. Save to Firestore
-  try {
-    const ref = doc(db, "subscription_requests", requestObj.id);
-    await syncSetDoc(ref, requestObj);
-  } catch (err) {
-    console.warn("Failed to sync subscription request to Firestore:", err);
-  }
-
-  // 3. If tied to a project, notify backend endpoint
-  if (pId) {
+  // 2. Non-project subscription requests use the client Firestore record.
+  if (!pId) {
     try {
-      await fetch(`/api/credits/project-plan/${encodeURIComponent(pId)}/request-subscription`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          requestedPlanType: planReq,
-          userEmail: cleanEmail,
-          userName: userName || cleanEmail.split('@')[0],
-          projectName: pName,
-          message: requestObj.notes
-        })
-      });
+      const ref = doc(db, "subscription_requests", requestObj.id);
+      await syncSetDoc(ref, requestObj);
     } catch (err) {
-      console.warn("Backend project subscription endpoint notice warning:", err);
+      console.warn("Failed to sync subscription request to Firestore:", err);
     }
   }
 
@@ -320,21 +321,16 @@ export const createSubscriptionRequest = async (
   }
 
   // 5. Also trigger backend notification / email route
-  try {
-    await fetch('/api/subscription/request', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        userEmail: cleanEmail,
-        userName,
-        projectId: pId,
-        projectName: pName,
-        currentUsedCredits,
-        notes: requestObj.notes
-      })
-    });
-  } catch (err) {
-    console.warn("Server subscription notify endpoint warning:", err);
+  if (!pId) {
+    try {
+      await fetch('/api/subscription/request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userEmail: cleanEmail, userName, currentUsedCredits, notes: requestObj.notes })
+      });
+    } catch (err) {
+      console.warn("Server subscription notify endpoint warning:", err);
+    }
   }
 
   // 6. Global events

@@ -583,15 +583,9 @@ const ApiTesting: React.FC<ApiTestingProps> = ({ project, user, onUpdateProject 
       return;
     }
 
-    const creditRes = await deductProjectCredits(
-      projectRef.current?.id || 'proj-default',
-      'api_testing',
-      'analysis',
-      user,
-      { projectName: projectRef.current?.name, outputType: `API Execution (${method} ${finalUrl.pathname})` }
-    );
-    if (!creditRes.success) {
-      toast.error(creditRes.error || 'Project credits exhausted. Please subscribe to continue.');
+    const permission = await canPerformAction(projectRef.current?.id || 'proj-default', 'api_testing', 'analysis', projectRef.current?.name);
+    if (!permission.allowed) {
+      toast.error(permission.reason || 'Project credits exhausted. Please subscribe to continue.');
       return;
     }
 
@@ -679,6 +673,18 @@ const ApiTesting: React.FC<ApiTestingProps> = ({ project, user, onUpdateProject 
 
       if (!res) {
         throw new Error(proxyErrorMsg || "Unable to reach target API endpoint. Please check the URL, protocol (HTTP/HTTPS), or network connection.");
+      }
+
+      const creditRes = await deductProjectCredits(
+        projectRef.current?.id || 'proj-default',
+        'api_testing',
+        'analysis',
+        user,
+        { projectName: projectRef.current?.name, outputType: `API Execution (${method} ${finalUrl.pathname})` }
+      );
+      if (!creditRes.success) {
+        toast.error(creditRes.error || 'Project credits exhausted.');
+        return;
       }
 
       const endTime = performance.now();
@@ -1426,7 +1432,17 @@ const ApiTesting: React.FC<ApiTestingProps> = ({ project, user, onUpdateProject 
   const handleDeleteApiScenario = (id: string) => {
     const currentProj = projectRef.current;
     const updatedApiScenarios = (currentProj.apiScenarios || []).filter(s => s.id !== id);
-    onUpdateProject({ ...currentProj, apiScenarios: updatedApiScenarios });
+    // updateProject merges current state with durable backups. Without a
+    // tombstone, the removed scenario is merged straight back in and the
+    // displayed count remains unchanged.
+    addDeletedIds([id], currentProj.id);
+    const deletedItemIds = Array.from(new Set([...(currentProj.deletedItemIds || []), id]));
+    onUpdateProject({
+      ...currentProj,
+      apiScenarios: updatedApiScenarios,
+      deletedItemIds,
+      deletedItemIdsVersion: 2
+    });
     toast.success('API scenario removed.');
   };
 
@@ -1438,7 +1454,12 @@ const ApiTesting: React.FC<ApiTestingProps> = ({ project, user, onUpdateProject 
       name: newWsName.trim(), requests: [], collections: [],
       createdAt: new Date().toISOString(), isOpen: true
     };
-    onUpdateProject({ ...currentProj, apiWorkspaces: [newWs, ...(currentProj.apiWorkspaces || [])] });
+    try {
+      await Promise.resolve(onUpdateProject({ ...currentProj, apiWorkspaces: [newWs, ...(currentProj.apiWorkspaces || [])] }));
+    } catch (err) {
+      toast.error('Could not save the API workspace. Please try again.');
+      return;
+    }
     setNewWsName(''); setIsCreateWsModalOpen(false);
     toggleExpand(newWs.id);
     logActivity(user.email, user.name, `Created API Workspace: ${newWs.name}`, currentProj.id, currentProj.name);

@@ -10529,10 +10529,10 @@ function calculateCreditsConsumedServer(
     return 50;
   }
 
-  // 5. Automation - Record & Play - Web App: Trial (100 / 50), Paid (100 / 50)
+  // 5. Automation - Record & Play - Web App: Trial (100 / 50), Paid (50 / 50)
   if (f.includes('record') && f.includes('web') && !f.includes('mobile')) {
     if (actionType === 'export') return 50;
-    return 100;
+    return planType === 'Paid' ? 50 : 100;
   }
 
   // 6. Automation - Record & Play - Mobile App: Trial (100 / 50), Paid (100 / 50)
@@ -11202,9 +11202,17 @@ async function syncProjectPlanFromFirestore(projectIdOrName: string, fallbackPro
       idx = localPlans.findIndex(p => !p.projectId && p.projectName?.toLowerCase().trim() === firestorePlan?.projectName?.toLowerCase().trim());
     }
     if (idx !== -1) {
-      const mergedPlan = { ...localPlans[idx], ...firestorePlan };
-      const isNewerCycle = (firestorePlan.cycleStartTimestamp || 0) > (localPlans[idx].cycleStartTimestamp || 0) ||
-                           (firestorePlan.lastRenewedAt || 0) > (localPlans[idx].lastRenewedAt || 0);
+      const localPlan = localPlans[idx];
+      const localCycle = Math.max(localPlan.lastRenewedAt || 0, localPlan.cycleStartTimestamp || 0);
+      const firestoreCycle = Math.max(firestorePlan.lastRenewedAt || 0, firestorePlan.cycleStartTimestamp || 0);
+      const localType = (localPlan.planType || localPlan.creditPlan || '').toString().toLowerCase();
+      const firestoreType = (firestorePlan.planType || firestorePlan.creditPlan || '').toString().toLowerCase();
+      const preferFirestore = firestoreCycle > localCycle ||
+        (firestoreCycle === localCycle && (!localType || !firestoreType || localType === firestoreType));
+      const mergedPlan = preferFirestore
+        ? { ...localPlan, ...firestorePlan }
+        : { ...firestorePlan, ...localPlan };
+      const isNewerCycle = firestoreCycle > localCycle;
       if (isNewerCycle) {
         mergedPlan.consumedCredits = 0;
         mergedPlan.remainingCredits = firestorePlan.allocatedCredits || mergedPlan.allocatedCredits;
@@ -11228,9 +11236,6 @@ function getOrInitProjectPlanServer(projectIdOrName: string, fallbackProjectName
   const cleanStr = (s?: string) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const lowerClean = cleanStr(lower);
   const lowerNameClean = cleanStr(lowerName);
-  const isPaidTarget = clientPlanHint === 'Paid' || clientPlanHint === 'paid' ||
-                 lower.includes('27/07') || lower.includes('pradee') || lower.includes('healthcare') || lower.includes('indihood') || lower.includes('bck2') || lower.includes('vodafone') ||
-                 lowerName.includes('27/07') || lowerName.includes('pradee') || lowerName.includes('healthcare') || lowerName.includes('indihood') || lowerName.includes('bck2') || lowerName.includes('vodafone');
 
   // 1. Exact ID match (highest priority)
   let found = plans.find(p => {
@@ -11277,7 +11282,8 @@ function getOrInitProjectPlanServer(projectIdOrName: string, fallbackProjectName
   }
 
   if (!found) {
-    const isPaid = isPaidTarget;
+    // New projects use the trial allocation; existing plans come from storage.
+    const isPaid = false;
     const planType: 'Trial' | 'Paid' = isPaid ? 'Paid' : 'Trial';
     const allocatedCredits = isPaid ? 1000 : 100;
     const validityDays = isPaid ? 30 : 7;
@@ -11309,21 +11315,14 @@ function getOrInitProjectPlanServer(projectIdOrName: string, fallbackProjectName
     plans.push(found);
     saveProjectPlansServer(plans);
   } else {
-    // If target is Paid plan or record is already Paid / allocated >= 1000, preserve Paid plan permanently
-    const shouldBePaid = isPaidTarget || found.planType === 'Paid' || (found.allocatedCredits && found.allocatedCredits >= 1000);
-    if (shouldBePaid) {
-      if (found.planType !== 'Paid' || found.allocatedCredits < 1000) {
-        found.planType = 'Paid';
-        found.creditPlan = 'paid';
-        found.allocatedCredits = 1000;
-        found.totalCredits = 1000;
-        found.validityDays = 30;
-        found.status = 'active';
-        found.subscriptionStatus = 'active';
-        found.remainingCredits = Math.max(0, 1000 - (found.consumedCredits || 0));
-        saveProjectPlansServer(plans);
-      }
-    }
+    // A stale credit-pool size or browser hint must never switch the plan.
+    const normalizedPlanType = (found.planType || found.creditPlan || '').toString().toLowerCase();
+    const isPaid = normalizedPlanType === 'paid' || (!normalizedPlanType && (found.allocatedCredits || found.totalCredits || 0) >= 1000);
+    found.planType = isPaid ? 'Paid' : 'Trial';
+    found.creditPlan = isPaid ? 'paid' : 'trial';
+    found.allocatedCredits = isPaid ? 1000 : 100;
+    found.totalCredits = found.allocatedCredits;
+    found.validityDays = isPaid ? 30 : 7;
     // Ensure all required fields exist on retrieved record
     if (!found.creditPlan) found.creditPlan = found.planType.toLowerCase() as any;
     if (found.totalCredits === undefined) found.totalCredits = found.allocatedCredits;
@@ -11338,7 +11337,12 @@ function getOrInitProjectPlanServer(projectIdOrName: string, fallbackProjectName
       const c = l.creditsConsumed ?? calculateCreditsConsumedServer(l.feature, l.itemsGenerated || 1, l.cached, l.actionType || 'analysis', found.planType);
       return sum + c;
     }, 0);
-    found.consumedCredits = Math.min(found.allocatedCredits || 1000, Math.max(found.consumedCredits || 0, rawConsumed));
+    // A non-empty current-cycle log set is the source of truth. Persisted plan
+    // counters can include duplicate events from older writers, so taking the
+    // max with that stale value can permanently gate a project below its real
+    // balance. Keep the saved counter only when there are no logs to reconcile.
+    const reconciledConsumed = cycleLogs.length > 0 ? rawConsumed : (found.consumedCredits || 0);
+    found.consumedCredits = Math.min(found.allocatedCredits || 1000, reconciledConsumed);
     found.remainingCredits = Math.max(0, (found.allocatedCredits || 1000) - found.consumedCredits);
   }
 
@@ -11358,7 +11362,7 @@ function getProjectCurrentCycleLogsServer(plan: ProjectPlanRecord): any[] {
   const pIdLower = plan.projectId.toLowerCase().trim();
   const pNameLower = plan.projectName.toLowerCase().trim();
 
-  return diskLogs.filter(log => {
+  const matchingLogs = diskLogs.filter(log => {
     if (!log) return false;
     const logProjId = (log.projectId || '').toLowerCase().trim();
     const logProjName = (log.project || '').toLowerCase().trim();
@@ -11371,6 +11375,30 @@ function getProjectCurrentCycleLogsServer(plan: ProjectPlanRecord): any[] {
     const logTs = log.timestamp || 0;
     return logTs >= plan.cycleStartTimestamp;
   });
+
+  // Keep server credit accounting consistent with the browser's canonical
+  // deduplicateTokenLogs(): some generation flows write the same event more
+  // than once within a few seconds. Counting those copies can show 0 credits
+  // server-side while the project UI correctly shows a positive balance.
+  const seenIds = new Set<string>();
+  const uniqueLogs: any[] = [];
+  for (const log of matchingLogs) {
+    if (!log?.id || seenIds.has(log.id)) continue;
+    const duplicateEvent = uniqueLogs.some(existing => {
+      const timeDiff = Math.abs((existing.timestamp || 0) - (log.timestamp || 0));
+      const sameUser = existing.user === log.user || existing.userEmail === log.userEmail;
+      const sameFeature = existing.feature === log.feature;
+      const sameStory = Boolean(existing.userStoryId && log.userStoryId && existing.userStoryId === log.userStoryId);
+      const sameItems = existing.itemsGenerated === log.itemsGenerated;
+      return timeDiff < 8000 && sameUser && (sameFeature || sameStory) &&
+        (sameItems || existing.totalTokens === log.totalTokens);
+    });
+    if (!duplicateEvent) {
+      seenIds.add(log.id);
+      uniqueLogs.push(log);
+    }
+  }
+  return uniqueLogs;
 }
 
 function checkProjectCreditsServer(
@@ -11423,7 +11451,8 @@ function checkProjectCreditsServer(
     return sum + c;
   }, 0);
 
-  let usedCredits = Math.min(plan.allocatedCredits || 1000, Math.max(plan.consumedCredits || 0, rawConsumed));
+  const reconciledConsumed = cycleLogs.length > 0 ? rawConsumed : (plan.consumedCredits || 0);
+  let usedCredits = Math.min(plan.allocatedCredits || 1000, reconciledConsumed);
   let remainingCredits = Math.max(0, (plan.allocatedCredits || 1000) - usedCredits);
 
   plan.consumedCredits = usedCredits;
@@ -12066,11 +12095,10 @@ async function recordTokenLogServer(params: {
       });
     } catch (err: any) {
       console.warn("[/api/credits/check-permission] Handled error:", err?.message || err);
-      return res.json({
-        allowed: true,
-        cost: 20,
-        remainingCredits: 1000,
-        plan: { planType: 'Paid', status: 'active', remainingCredits: 1000 }
+      return res.status(503).json({
+        allowed: false,
+        code: 'INTERNAL_ERROR',
+        error: 'Credit service is temporarily unavailable. Please retry.'
       });
     }
   });
@@ -12216,18 +12244,19 @@ async function recordTokenLogServer(params: {
     const existingRequests = loadSubscriptionRequestsServer();
     const targetIdLower = plan.projectId.toLowerCase().trim();
     const targetNameLower = plan.projectName.toLowerCase().trim();
-    const isAlreadyPending = existingRequests.some(r => {
+    const existingPending = existingRequests.find(r => {
       const rProjId = (r.projectId || '').toLowerCase().trim();
       const rProjName = (r.projectName || '').toLowerCase().trim();
       const matchesProj = rProjId === targetIdLower || rProjName === targetNameLower;
       return matchesProj && (r.status === 'pending' || r.status === 'PENDING');
     });
 
-    if (isAlreadyPending || plan.subscriptionRequestStatus === 'pending') {
-      return res.status(400).json({
-        success: false,
-        error: "Subscription request is already pending approval.",
-        message: "Subscription request is already pending approval."
+    if (existingPending || plan.subscriptionRequestStatus === 'pending') {
+      return res.json({
+        success: true,
+        message: "Subscription request is already pending approval.",
+        request: existingPending,
+        plan
       });
     }
 

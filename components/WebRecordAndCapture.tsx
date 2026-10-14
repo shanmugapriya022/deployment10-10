@@ -4315,7 +4315,11 @@ export const WebRecordAndCapture: React.FC<WebRecordAndCaptureProps> = ({
                                       <span className="font-mono font-bold text-cyan-400">Submitted Request Body (Raw Payload)</span>
                                       <button
                                         type="button"
-                                        onClick={() => navigator.clipboard.writeText(req.rawBody || '')}
+                                        onClick={async () => {
+                                          const ok = await deductExportCredits(project?.id || 'proj-default', 'record_play_web', user, 'Copy Recorded Request Payload', project?.name);
+                                          if (!ok) return;
+                                          await navigator.clipboard.writeText(req.rawBody || '');
+                                        }}
                                         className="hover:text-white px-2 py-0.5 rounded bg-slate-800 flex items-center gap-1 font-mono"
                                       >
                                         <Copy size={11} /> Copy
@@ -4573,8 +4577,10 @@ export const WebRecordAndCapture: React.FC<WebRecordAndCaptureProps> = ({
 
                   <button
                     type="button"
-                    onClick={() => {
-                      navigator.clipboard.writeText(generatedJmx);
+                    onClick={async () => {
+                      const ok = await deductExportCredits(project?.id || 'proj-default', 'record_play_web', user, 'Copy Generated JMX', project?.name);
+                      if (!ok) return;
+                      await navigator.clipboard.writeText(generatedJmx);
                       setCopiedJmx(true);
                       setTimeout(() => setCopiedJmx(false), 2000);
                     }}

@@ -78,7 +78,7 @@ import {
 } from '../types';
 import { VideoInputUploader, VideoWalkthroughData } from './VideoInputUploader';
 import { FolderVideoPlayer } from './FolderVideoPlayer';
-import { uploadAndPersistVideo, saveVideoBlob } from '../services/artifactStorage';
+import { uploadAndPersistVideo } from '../services/artifactStorage';
 import { ScreenshotUploader, ScreenshotFile } from './ScreenshotUploader';
 import { RAGStatusBadge } from './RAGStatusBadge';
 import { generateTestCasesFromScenario, generateFallbackTestCases } from '../geminiService';
@@ -165,6 +165,9 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
   onNavigateTab,
   initialView = 'scenarios'
 }) => {
+  const projectRef = useRef(project);
+  projectRef.current = project;
+
   // Main view tab: 'folders' or 'scenarios' (defaults to 'scenarios' so approved individual scenarios are immediately visible)
   const [activeView, setActiveView] = useState<'folders' | 'scenarios'>(initialView);
 
@@ -1302,7 +1305,7 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
         };
       });
 
-      onUpdateProject({ ...project, scenarios: updatedScenarios });
+      await Promise.resolve(onUpdateProject({ ...project, scenarios: updatedScenarios }));
       toast.success('Test case unapproved');
       return;
     }
@@ -1382,7 +1385,7 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
         return scen;
       });
 
-      onUpdateProject({ ...project, scenarios: updatedScenarios });
+      await Promise.resolve(onUpdateProject({ ...project, scenarios: updatedScenarios }));
       toast.success(`Folder "${targetFolder.title}" unapproved`);
       return;
     }
@@ -2902,6 +2905,7 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
     setIsSavingGeneratedCases(true);
 
     try {
+      let videoUploadPromise: Promise<string> | null = null;
       const targetSourceIds = sourceScenarioIds && sourceScenarioIds.length > 0
         ? sourceScenarioIds
         : sourceScenarioId
@@ -2983,25 +2987,24 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
         }
 
         if (rawBlobOrFile) {
-          try {
-            // Keep a local recovery copy under the stable folder ID. The file
-            // name alone can collide when different folders use the same
-            // uploaded filename.
-            await saveVideoBlob(targetFolderId, rawBlobOrFile, videoFileName);
-          } catch (e) {
-            console.warn('[handleConfirmSaveGeneratedCases] IndexedDB save notice:', e);
-          }
-
-          try {
-            const res = await uploadAndPersistVideo(targetFolderId, rawBlobOrFile, videoFileName);
-            if (res && res.url) {
-              persistentVideoUrl = res.url;
-            }
-          } catch (upErr) {
-            console.warn('[handleConfirmSaveGeneratedCases] Server upload notice:', upErr);
-          }
+          // Upload/storage can take much longer than saving the generated
+          // cases. uploadAndPersistVideo caches the Blob locally immediately;
+          // let its durable network work finish in the background.
+          videoUploadPromise = uploadAndPersistVideo(targetFolderId, rawBlobOrFile, videoFileName)
+            .then(result => result?.url || '')
+            .catch(uploadError => {
+              console.warn('[handleConfirmSaveGeneratedCases] Background video upload notice:', uploadError);
+              return '';
+            });
         }
       }
+
+      // A blob URL only belongs to this browser session. The video remains
+      // retrievable from the local artifact cache until the durable URL arrives.
+      if (persistentVideoUrl.startsWith('blob:')) persistentVideoUrl = '';
+      const availableVideoUrl = persistentVideoUrl ||
+        (attachedVideo?.videoUrl && !attachedVideo.videoUrl.startsWith('blob:') ? attachedVideo.videoUrl : '') ||
+        (videoData?.videoUrl && !videoData.videoUrl.startsWith('blob:') ? videoData.videoUrl : undefined);
 
       const activeFrames = (attachedVideo?.frames && attachedVideo.frames.length > 0)
         ? attachedVideo.frames
@@ -3011,7 +3014,7 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
 
       const videoFieldsToSave = (attachedVideo || videoData) ? {
         videoFileName: attachedVideo?.fileName || videoData?.fileName,
-        videoUrl: persistentVideoUrl || attachedVideo?.videoUrl || videoData?.videoUrl || undefined,
+        videoUrl: availableVideoUrl,
         videoDuration: attachedVideo?.duration || videoData?.duration,
         videoFrames: activeFrames,
         videoSize: attachedVideo?.fileSize || videoData?.fileSize
@@ -3061,7 +3064,7 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
             memberScenarioIds: mergedMemberIds,
             ...(attachedVideo ? {
               videoFileName: attachedVideo.fileName || s.videoFileName,
-              videoUrl: persistentVideoUrl || attachedVideo.videoUrl || s.videoUrl,
+              videoUrl: availableVideoUrl || s.videoUrl,
               videoDuration: attachedVideo.duration || s.videoDuration,
               videoFrames: (attachedVideo.frames && attachedVideo.frames.length > 0) ? attachedVideo.frames : s.videoFrames,
               videoSize: attachedVideo.fileSize || s.videoSize
@@ -3082,7 +3085,7 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
             isApproved: true,
             ...(attachedVideo ? {
               videoFileName: attachedVideo.fileName || s.videoFileName,
-              videoUrl: persistentVideoUrl || attachedVideo.videoUrl || s.videoUrl,
+              videoUrl: availableVideoUrl || s.videoUrl,
               videoDuration: attachedVideo.duration || s.videoDuration,
               videoFrames: (attachedVideo.frames && attachedVideo.frames.length > 0) ? attachedVideo.frames : s.videoFrames,
               videoSize: attachedVideo.fileSize || s.videoSize
@@ -3113,7 +3116,25 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
         updatedScenarios = [newFolderObj, ...updatedScenarios];
       }
 
-      onUpdateProject({ ...project, scenarios: updatedScenarios });
+      await Promise.resolve(onUpdateProject({ ...project, scenarios: updatedScenarios }));
+      if (videoUploadPromise) {
+        void videoUploadPromise.then(uploadedUrl => {
+          if (!uploadedUrl || uploadedUrl.startsWith('blob:')) return;
+          const latestProject = projectRef.current;
+          let latestScenarios = [...(latestProject.scenarios || [])];
+          const folderAlreadyPresent = latestScenarios.some(s => s.id === targetFolderId);
+          if (!folderAlreadyPresent && isNewFolderCreation && newFolderObj) {
+            latestScenarios = [newFolderObj, ...latestScenarios];
+          }
+          latestScenarios = latestScenarios.map(s => {
+            if (s.id === targetFolderId || targetSourceIds.includes(s.id)) {
+              return { ...s, videoUrl: uploadedUrl };
+            }
+            return s;
+          });
+          onUpdateProject({ ...latestProject, scenarios: latestScenarios });
+        });
+      }
       setSelectedScenarioId(targetFolderId);
       setActiveView('folders');
       setExpandedFolderIds(prev => new Set([...Array.from(prev), targetFolderId]));
@@ -3130,7 +3151,6 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
       toast.error('Failed to save test cases to folder');
     } finally {
       setIsSavingGeneratedCases(false);
-      setSaveGeneratedCasesModal(null);
     }
   };
 

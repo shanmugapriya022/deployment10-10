@@ -1491,18 +1491,15 @@ export const getTokenLogs = (): TokenLog[] => {
     if (saved !== null) {
       const parsed = JSON.parse(saved);
       if (Array.isArray(parsed) && parsed.length > 0) {
-        const currentActiveProject = getActiveProjectName();
         const mappedLogs = parsed.map((item: TokenLog) => {
-          let resolvedProject = item.project;
-          if (SEED_PROJECT_MAP[item.id]) {
-            resolvedProject = SEED_PROJECT_MAP[item.id];
-          } else if (!resolvedProject || resolvedProject === 'Banking App' || resolvedProject === 'AutomatiQA Project' || resolvedProject === 'SmartCart E-Commerce Platform') {
-            resolvedProject = currentActiveProject;
-          }
+          // Historical records with no project identity (or a legacy sample
+          // label) must stay unattributed. Assigning them to the currently
+          // selected project on login falsely consumes that project's pool.
+          const resolvedProject = SEED_PROJECT_MAP[item.id] || item.project || '';
 
           return {
             ...item,
-            project: resolvedProject || currentActiveProject,
+            project: resolvedProject,
             costUsd: calculateTokenCostUsd(item.inputTokens, item.outputTokens, item.cached)
           };
         });
@@ -2294,6 +2291,16 @@ export const getProjectPlans = async (): Promise<ProjectPlan[]> => {
 
   // Combine and deduplicate safely keeping the latest cycleStartTimestamp / lastRenewedAt
   const combinedMap = new Map<string, ProjectPlan>();
+  const resolvePlanType = (plan: ProjectPlan): PlanType => {
+    const storedType = (plan.planType || '').toLowerCase();
+    if (storedType === 'paid') return 'Paid';
+    if (storedType === 'trial') return 'Trial';
+    const storedCreditPlan = (plan.creditPlan || '').toString().toLowerCase();
+    if (storedCreditPlan === 'paid') return 'Paid';
+    if (storedCreditPlan === 'trial') return 'Trial';
+    if ((plan.allocatedCredits || plan.totalCredits || 0) >= 1000) return 'Paid';
+    return 'Trial';
+  };
 
   const upsertPlanIfNewer = (p: ProjectPlan) => {
     if (!p) return;
@@ -2303,40 +2310,31 @@ export const getProjectPlans = async (): Promise<ProjectPlan[]> => {
       (p.projectName || '').toLowerCase().trim().replace(/[^a-z0-9]/g, '')
     ].filter(Boolean);
 
-    const pTime = p.lastRenewedAt || p.cycleStartTimestamp || 0;
+    const pTime = Math.max(p.lastRenewedAt || 0, p.cycleStartTimestamp || 0);
 
     for (const k of keys) {
       const existing = combinedMap.get(k);
       if (!existing) {
         combinedMap.set(k, p);
       } else {
-        const isRenewal =
-          (p.cycleStartTimestamp || 0) > (existing.cycleStartTimestamp || 0) ||
-          Boolean(p.lastRenewedAt && (!existing.lastRenewedAt || p.lastRenewedAt > existing.lastRenewedAt));
-
-        if (isRenewal) {
-          combinedMap.set(k, p);
-        } else {
-          const isPaid = (p.planType === 'Paid' || existing.planType === 'Paid' || (p.allocatedCredits && p.allocatedCredits >= 1000) || (existing.allocatedCredits && existing.allocatedCredits >= 1000));
-          const allocated = Math.max(existing.allocatedCredits || 0, p.allocatedCredits || 0, isPaid ? 1000 : 100);
-          const exConsumed = (typeof existing.consumedCredits === 'number' && existing.consumedCredits <= allocated) ? existing.consumedCredits : 0;
-          const pConsumed = (typeof p.consumedCredits === 'number' && p.consumedCredits <= allocated) ? p.consumedCredits : 0;
-          const maxConsumed = Math.min(Math.max(exConsumed, pConsumed), allocated);
-          const remaining = Math.max(0, allocated - maxConsumed);
-
-          const merged: ProjectPlan = {
-            ...existing,
-            ...p,
-            planType: isPaid ? 'Paid' : 'Trial',
-            allocatedCredits: allocated,
-            totalCredits: allocated,
-            consumedCredits: maxConsumed,
-            remainingCredits: remaining,
-            status: remaining <= 0 ? 'exhausted' : (existing.status || p.status || 'active'),
-            subscriptionStatus: remaining <= 0 ? 'exhausted' : (existing.subscriptionStatus || p.subscriptionStatus || 'active')
-          };
-          combinedMap.set(k, merged);
-        }
+        const existingTime = Math.max(existing.lastRenewedAt || 0, existing.cycleStartTimestamp || 0);
+        // Sources are read local -> server -> Firestore. For an equal cycle the
+        // later source wins plan metadata; never infer Paid from an old pool size.
+        const preferred = pTime >= existingTime ? p : existing;
+        const preferredType = resolvePlanType(preferred);
+        const allocated = preferredType === 'Paid' ? 1000 : 100;
+        const consumed = Math.min(allocated, pTime === existingTime
+          ? Math.max(existing.consumedCredits || 0, p.consumedCredits || 0)
+          : (preferred.consumedCredits || 0));
+        combinedMap.set(k, {
+          ...existing,
+          ...preferred,
+          planType: preferredType,
+          allocatedCredits: allocated,
+          totalCredits: allocated,
+          consumedCredits: consumed,
+          remainingCredits: Math.max(0, allocated - consumed)
+        });
       }
     }
   };
@@ -2360,17 +2358,51 @@ export const getProjectPlans = async (): Promise<ProjectPlan[]> => {
   // Firestore plans next (only overwrite if equal or newer)
   firestorePlans.forEach(p => upsertPlanIfNewer(p));
 
-  const seen = new Set<string>();
+  // Alias keys above can leave an older plan under its old projectId even
+  // after the newer record replaced the projectName key. Collapse those
+  // aliases by stable project name and select the record from the newest
+  // renewal cycle before exposing plans to login-time consumers.
+  const plansByIdentity = new Map<string, ProjectPlan>();
+  for (const candidate of combinedMap.values()) {
+    const normalizedName = (candidate.projectName || '').toLowerCase().trim().replace(/[^a-z0-9]/g, '');
+    const normalizedId = (candidate.projectId || '').toLowerCase().trim().replace(/^proj-/, '');
+    const identity = normalizedName ? `name:${normalizedName}` : `id:${normalizedId}`;
+    const existing = plansByIdentity.get(identity);
+    if (!existing) {
+      plansByIdentity.set(identity, candidate);
+      continue;
+    }
+
+    const candidateCycle = Math.max(candidate.cycleStartTimestamp || 0, candidate.lastRenewedAt || 0);
+    const existingCycle = Math.max(existing.cycleStartTimestamp || 0, existing.lastRenewedAt || 0);
+    if (candidateCycle > existingCycle) {
+      plansByIdentity.set(identity, candidate);
+    } else if (candidateCycle >= existingCycle) {
+      const preferred = candidateCycle === existingCycle ? candidate : existing;
+      const preferredType = resolvePlanType(preferred);
+      const allocated = preferredType === 'Paid' ? 1000 : 100;
+      const consumed = Math.min(allocated, candidateCycle === existingCycle
+        ? Math.max(existing.consumedCredits || 0, candidate.consumedCredits || 0)
+        : (preferred.consumedCredits || 0));
+      plansByIdentity.set(identity, {
+        ...existing,
+        ...preferred,
+        planType: preferredType,
+        allocatedCredits: allocated,
+        totalCredits: allocated,
+        consumedCredits: consumed,
+        remainingCredits: Math.max(0, allocated - consumed)
+      });
+    }
+  }
+
   const finalPlans: ProjectPlan[] = [];
   const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
-  for (const p of combinedMap.values()) {
-    const key = (p.projectId || p.projectName || '').toLowerCase().trim();
-    if (!seen.has(key)) {
-      seen.add(key);
-      const isTrial = (p.planType || '').toLowerCase() === 'trial';
-      const targetValidity = p.validityDays || (isTrial ? 7 : 30);
-      const targetCredits = p.allocatedCredits || (isTrial ? 100 : 1000);
+  for (const p of plansByIdentity.values()) {
+      const isTrial = resolvePlanType(p) === 'Trial';
+      const targetValidity = isTrial ? 7 : 30;
+      const targetCredits = isTrial ? 100 : 1000;
       const consumedCredits = p.consumedCredits ?? 0;
       const remainingCredits = Math.max(0, targetCredits - consumedCredits);
 
@@ -2398,7 +2430,6 @@ export const getProjectPlans = async (): Promise<ProjectPlan[]> => {
         cycleEndTimestamp: hasExcessCycle ? expectedEnd : (p.cycleEndTimestamp && p.cycleEndTimestamp > Date.now() ? p.cycleEndTimestamp : expectedEnd),
         cycleEndDateFormatted: hasExcessCycle ? formatToIST(expectedEnd) : (p.cycleEndTimestamp && p.cycleEndTimestamp > Date.now() ? formatToIST(p.cycleEndTimestamp) : formatToIST(expectedEnd))
       });
-    }
   }
 
   if (finalPlans.length > 0) {
@@ -2486,7 +2517,8 @@ export const getProjectPlanSync = (projectId?: string, projectName?: string): Pr
   }
 
   if (found) {
-    const isTrial = (found.planType || '').toLowerCase() === 'trial';
+    const foundType = (found.planType || found.creditPlan || '').toString().toLowerCase();
+    const isTrial = foundType === 'trial' || (!foundType && (found.allocatedCredits || found.totalCredits || 0) < 1000);
     const targetValidity = isTrial ? 7 : 30;
     const targetCredits = isTrial ? 100 : 1000;
     const ONE_DAY_MS = 24 * 60 * 60 * 1000;
@@ -2511,11 +2543,11 @@ export const getProjectPlanSync = (projectId?: string, projectName?: string): Pr
     getProjectPlans().catch(() => {});
   }
 
-  // Default initial plan: Paid for default 27/07, Pradee, Healthcare, Indihood, BCK2, Vodafone, Trial for others
-  const isDefaultPaid = pNameLower.includes('27/07') || pNameLower.includes('pradee') || pNameLower.includes('healthcare') || pNameLower.includes('indihood') || pNameLower.includes('bck2') || pNameLower.includes('vodafone') || pIdLower.includes('bck2') || pIdLower.includes('vodafone') || pIdLower.includes('3tfgx1rmsntcak6oqa1') || pIdLower.includes('8prqudsm96tdy1tfihyi');
-  const planType: PlanType = isDefaultPaid ? 'Paid' : 'Trial';
-  const allocatedCredits = isDefaultPaid ? 1000 : 100;
-  const validityDays = isDefaultPaid ? 30 : 7;
+  // An unknown project's plan is not inferred from its name or ID. The
+  // authoritative stored plan replaces this conservative initial fallback.
+  const planType: PlanType = 'Trial';
+  const allocatedCredits = 100;
+  const validityDays = 7;
   const now = Date.now();
   const endTimestamp = now + (validityDays * 24 * 60 * 60 * 1000);
 
@@ -2807,22 +2839,33 @@ export const syncAndUpdateCachedPlans = (
       (newNameClean && curNameClean === newNameClean)
     ) {
       matched = true;
-      const isExistingPaid = p.planType === 'Paid' || (p.allocatedCredits && p.allocatedCredits >= 1000);
-      const isNewPlanTrial = newPlan.planType === 'Trial' || (!newPlan.allocatedCredits || newPlan.allocatedCredits < 1000);
+      const existingCycle = Math.max(p.cycleStartTimestamp || 0, p.lastRenewedAt || 0);
+      const incomingCycle = Math.max(newPlan.cycleStartTimestamp || 0, newPlan.lastRenewedAt || 0);
+      const existingType = (p.planType || p.creditPlan || '').toString().toLowerCase();
+      const incomingType = (newPlan.planType || newPlan.creditPlan || '').toString().toLowerCase() ||
+        ((newPlan.allocatedCredits || newPlan.totalCredits || 0) >= 1000 ? 'paid' : 'trial');
 
-      if (isExistingPaid && isNewPlanTrial) {
-        return {
-          ...p,
-          ...newPlan,
-          planType: 'Paid' as PlanType,
-          creditPlan: 'paid' as any,
-          allocatedCredits: Math.max(p.allocatedCredits || 1000, 1000),
-          totalCredits: Math.max(p.totalCredits || 1000, 1000),
-          validityDays: Math.max(p.validityDays || 30, 30),
-          remainingCredits: Math.max(0, 1000 - (newPlan.consumedCredits ?? p.consumedCredits ?? 0))
-        };
+      // A plan switch always starts a new cycle. Ignore older snapshots, and
+      // keep the already cached value if conflicting records claim the same
+      // cycle, rather than allowing listener order to flip the visible plan.
+      if (incomingCycle < existingCycle ||
+          (incomingCycle === existingCycle && existingType && incomingType && existingType !== incomingType)) {
+        return p;
       }
-      return newPlan;
+
+      const planType: PlanType = incomingType === 'paid' ? 'Paid' : 'Trial';
+      const allocatedCredits = planType === 'Paid' ? 1000 : 100;
+      const consumedCredits = Math.min(allocatedCredits, newPlan.consumedCredits ?? 0);
+      return {
+        ...newPlan,
+        planType,
+        creditPlan: planType.toLowerCase() as any,
+        allocatedCredits,
+        totalCredits: allocatedCredits,
+        validityDays: planType === 'Paid' ? 30 : 7,
+        consumedCredits,
+        remainingCredits: Math.max(0, allocatedCredits - consumedCredits)
+      };
     }
     return p;
   });

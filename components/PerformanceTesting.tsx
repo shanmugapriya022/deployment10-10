@@ -828,13 +828,14 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
 
   const handleDownloadJmx = async (script: PerformanceScript) => {
     try {
-      await deductExportCredits(
+      const ok = await deductExportCredits(
         project.id,
         'api_performance',
         user,
         `Download Artifact (${script.name || 'Artifact'}) [Artifact Repository Archives]`,
         project.name
       );
+      if (!ok) return;
 
       let content = '';
       let fileExtension = 'jmx';

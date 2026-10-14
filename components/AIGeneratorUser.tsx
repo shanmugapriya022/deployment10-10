@@ -853,7 +853,12 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
   };
 
   // Copy to Clipboard Utility
+  const allowStoryExport = (outputType: string) => deductExportCredits(
+    project.id, 'ai_user_stories', user, outputType, project.name
+  );
+
   const handleCopyToClipboard = async (id: string, field: string, value: string) => {
+    if (!await allowStoryExport(`Copy User Story ${field}`)) return;
     navigator.clipboard.writeText(value);
     setCopiedField({ id, field });
     setTimeout(() => {
@@ -989,10 +994,8 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
     let updatedStories: UserStory[];
     if (editingStory) {
       updatedStories = activeStoriesList.map(s => s.id === editingStory.id ? savedStory : s);
-      toast.success('User story updated successfully');
     } else {
       updatedStories = [...activeStoriesList, savedStory];
-      toast.success('User story created manually');
     }
 
     const updatedProject = {
@@ -1000,12 +1003,18 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
       userStories: updatedStories
     };
 
-    saveStoryToFirestore(project.id, savedStory.folderId, savedStory).catch(err => 
-      console.warn('Story subcollection save notice:', err)
-    );
-
-    onUpdateProject(updatedProject);
+    try {
+      await Promise.all([
+        saveStoryToFirestore(project.id, savedStory.folderId, savedStory),
+        Promise.resolve(onUpdateProject(updatedProject))
+      ]);
+    } catch (err) {
+      console.error('[handleSaveStory] Persistence failed:', err);
+      toast.error('Could not save this user story. Please try again.');
+      return;
+    }
     setIsModalOpen(false);
+    toast.success(editingStory ? 'User story updated successfully' : 'User story created manually');
 
     if (selectedStory?.id === savedStory.id) {
       setSelectedStory(savedStory);
@@ -1274,8 +1283,8 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
 
       const finalStoriesList = [...updatedFolderList, ...preparedStories];
 
-      // 3. Update UI and close modal immediately!
-      onUpdateProject({ ...project, userStories: finalStoriesList });
+      // Wait for the project write before closing the save flow or reporting success.
+      await Promise.resolve(onUpdateProject({ ...project, userStories: finalStoriesList }));
 
       setIsFolderSelectModalOpen(false);
       setInlineNewFolderName('');
@@ -1299,22 +1308,9 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
 
       toast.success('User stories saved to folder successfully.');
 
-      // 4. Background persistence
-      (async () => {
-        try {
-          if (inlineFolderObj) {
-            await saveFolderToFirestore(project.id, inlineFolderObj).catch(() => {});
-          }
-          await saveStoriesBatchToFirestore(project.id, finalFolderId, preparedStories).catch(() => {});
-          logActivity(
-            user.email,
-            user.name,
-            `Saved ${storiesToSave.length} user stories into folder`,
-            project.id,
-            project.name
-          ).catch(() => {});
-        } catch (e) {}
-      })();
+      if (inlineFolderObj) await saveFolderToFirestore(project.id, inlineFolderObj);
+      await saveStoriesBatchToFirestore(project.id, finalFolderId, preparedStories);
+      await logActivity(user.email, user.name, `Saved ${storiesToSave.length} user stories into folder`, project.id, project.name).catch(() => {});
     } catch (err: any) {
       console.error('[handleSaveStoriesToFolder] Error:', err);
       toast.error('Failed to save user stories: ' + (err?.message || 'Firestore write error'));
@@ -1660,6 +1656,7 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
     });
 
     const safeFolderName = folder.summary.replace(/[^a-zA-Z0-9_-]/g, '_');
+    if (!await allowStoryExport(`Download User Stories Folder (${format.toUpperCase()})`)) return;
 
     if (format === 'excel') {
       downloadExcel(exportData, `${safeFolderName}_User_Stories`, 'Folder User Stories');
@@ -1695,6 +1692,7 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
     }));
 
     const safeSubfolderName = subfolder.summary.replace(/[^a-zA-Z0-9_-]/g, '_');
+    if (!await allowStoryExport(`Download User Stories Subfolder (${format.toUpperCase()})`)) return;
 
     if (format === 'excel') {
       downloadExcel(exportData, `Subfolder_${safeSubfolderName}_Stories`, 'Subfolder Stories');
@@ -1718,6 +1716,7 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
       'Created At': story.createdAt ? new Date(story.createdAt).toLocaleString() : 'N/A'
     }];
     const safeId = (story.storyId || story.id || 'User_Story').replace(/[^a-zA-Z0-9_-]/g, '_');
+    if (!await allowStoryExport(`Download User Story (${format.toUpperCase()})`)) return;
     if (format === 'excel') {
       downloadExcel(row, `${safeId}_Story`, 'Story Details');
       toast.success(`User story ${story.storyId || ''} downloaded as Excel!`);
@@ -1743,6 +1742,8 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
       'Folder': (s as any).folderName || 'N/A',
       'Created At': s.createdAt ? new Date(s.createdAt).toLocaleString() : 'N/A'
     }));
+
+    if (!await allowStoryExport(`Download Selected User Stories (${format.toUpperCase()})`)) return;
 
     if (format === 'excel') {
       downloadExcel(rows, `${project.name.replace(/\s+/g, '_')}_Selected_Stories`, 'Selected Stories');
@@ -1806,6 +1807,8 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
       'Created At': s.createdAt ? new Date(s.createdAt).toLocaleString() : 'N/A'
     }));
 
+    if (!await allowStoryExport('Download User Stories (EXCEL)')) return;
+
     downloadExcel(rows, `${project.name.replace(/\s+/g, '_')}_User_Stories`, 'User Stories');
     toast.success(`Exported ${storiesToExport.length} user stories to Excel!`);
   };
@@ -1826,6 +1829,8 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
       'Folder': (s as any).folderName || 'N/A',
       'Created At': s.createdAt ? new Date(s.createdAt).toLocaleString() : 'N/A'
     }));
+
+    if (!await allowStoryExport('Download User Stories (CSV)')) return;
 
     downloadCsv(rows, `${project.name.toLowerCase().replace(/\s+/g, '_')}_user_stories`);
     toast.success(`Exported ${storiesToExport.length} user stories to CSV!`);
