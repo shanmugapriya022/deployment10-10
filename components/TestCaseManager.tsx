@@ -1240,7 +1240,7 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
   };
 
   // Toggle single approval
-  const handleToggleApproval = (scenarioId: string, testCaseId: string) => {
+  const handleToggleApproval = async (scenarioId: string, testCaseId: string) => {
     // 1. Locate the test case across all scenarios and folders to determine current approval state
     let targetTestCase: TestCase | null = null;
     let parentScenario: TestScenario | null = null;
@@ -1328,7 +1328,7 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
   };
 
   // Toggle folder-level approval
-  const handleToggleFolderApproval = (folderId: string) => {
+  const handleToggleFolderApproval = async (folderId: string) => {
     const targetFolder = (project.scenarios || []).find(s => s.id === folderId);
     if (!targetFolder) return;
 
