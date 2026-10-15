@@ -1659,10 +1659,10 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
     if (!await allowStoryExport(`Download User Stories Folder (${format.toUpperCase()})`)) return;
 
     if (format === 'excel') {
-      downloadExcel(exportData, `${safeFolderName}_User_Stories`, 'Folder User Stories');
+      await downloadExcel(exportData, `${safeFolderName}_User_Stories`, 'Folder User Stories', true);
       toast.success(`Excel file for folder "${folder.summary}" downloaded successfully!`);
     } else {
-      downloadCsv(exportData, `${safeFolderName}_User_Stories`);
+      downloadCsv(exportData, `${safeFolderName}_User_Stories`, true);
       toast.success(`CSV file for folder "${folder.summary}" downloaded successfully!`);
     }
   };
@@ -1695,10 +1695,10 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
     if (!await allowStoryExport(`Download User Stories Subfolder (${format.toUpperCase()})`)) return;
 
     if (format === 'excel') {
-      downloadExcel(exportData, `Subfolder_${safeSubfolderName}_Stories`, 'Subfolder Stories');
+      await downloadExcel(exportData, `Subfolder_${safeSubfolderName}_Stories`, 'Subfolder Stories', true);
       toast.success(`Excel file for subfolder "${subfolder.summary}" downloaded successfully!`);
     } else {
-      downloadCsv(exportData, `Subfolder_${safeSubfolderName}_Stories`);
+      downloadCsv(exportData, `Subfolder_${safeSubfolderName}_Stories`, true);
       toast.success(`CSV file for subfolder "${subfolder.summary}" downloaded successfully!`);
     }
   };
@@ -1718,10 +1718,10 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
     const safeId = (story.storyId || story.id || 'User_Story').replace(/[^a-zA-Z0-9_-]/g, '_');
     if (!await allowStoryExport(`Download User Story (${format.toUpperCase()})`)) return;
     if (format === 'excel') {
-      downloadExcel(row, `${safeId}_Story`, 'Story Details');
+      await downloadExcel(row, `${safeId}_Story`, 'Story Details', true);
       toast.success(`User story ${story.storyId || ''} downloaded as Excel!`);
     } else {
-      downloadCsv(row, `${safeId}_Story`);
+      downloadCsv(row, `${safeId}_Story`, true);
       toast.success(`User story ${story.storyId || ''} downloaded as CSV!`);
     }
   };
@@ -1746,10 +1746,10 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
     if (!await allowStoryExport(`Download Selected User Stories (${format.toUpperCase()})`)) return;
 
     if (format === 'excel') {
-      downloadExcel(rows, `${project.name.replace(/\s+/g, '_')}_Selected_Stories`, 'Selected Stories');
+      await downloadExcel(rows, `${project.name.replace(/\s+/g, '_')}_Selected_Stories`, 'Selected Stories', true);
       toast.success(`Downloaded ${checkedStories.length} stories as Excel!`);
     } else {
-      downloadCsv(rows, `${project.name.replace(/\s+/g, '_')}_Selected_Stories`);
+      downloadCsv(rows, `${project.name.replace(/\s+/g, '_')}_Selected_Stories`, true);
       toast.success(`Downloaded ${checkedStories.length} stories as CSV!`);
     }
   };
@@ -1809,7 +1809,7 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
 
     if (!await allowStoryExport('Download User Stories (EXCEL)')) return;
 
-    downloadExcel(rows, `${project.name.replace(/\s+/g, '_')}_User_Stories`, 'User Stories');
+    await downloadExcel(rows, `${project.name.replace(/\s+/g, '_')}_User_Stories`, 'User Stories', true);
     toast.success(`Exported ${storiesToExport.length} user stories to Excel!`);
   };
 
@@ -1832,7 +1832,7 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
 
     if (!await allowStoryExport('Download User Stories (CSV)')) return;
 
-    downloadCsv(rows, `${project.name.toLowerCase().replace(/\s+/g, '_')}_user_stories`);
+    downloadCsv(rows, `${project.name.toLowerCase().replace(/\s+/g, '_')}_user_stories`, true);
     toast.success(`Exported ${storiesToExport.length} user stories to CSV!`);
   };
 

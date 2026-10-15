@@ -403,7 +403,10 @@ export const syncFolderReferences = <T extends Partial<Project>>(project: T): T 
 /**
  * Save project to in-memory cache, IndexedDB, localStorage (if fits), and server backup
  */
-export const saveProjectBackup = async (project: Project): Promise<void> => {
+export const saveProjectBackup = async (
+  project: Project,
+  options: { awaitServer?: boolean } = {}
+): Promise<void> => {
   if (!project || !project.id) return;
 
   // Run full folder and reference synchronization before persisting
@@ -412,7 +415,8 @@ export const saveProjectBackup = async (project: Project): Promise<void> => {
   // 1. In-Memory Cache update immediately
   memoryProjectCache.set(syncedProject.id, { ...syncedProject });
   // Queue before the IndexedDB await below, preserving call order across rapid saves.
-  queueProjectBackupWrite(syncedProject).catch(() => {});
+  const serverBackupWrite = queueProjectBackupWrite(syncedProject);
+  serverBackupWrite.catch(() => {});
 
   // 1b. Dedicated lightweight performance scripts backup (immune to 5MB localStorage limits)
   if (Array.isArray(syncedProject.performanceScripts)) {
@@ -508,6 +512,9 @@ export const saveProjectBackup = async (project: Project): Promise<void> => {
   }
 
   // 4. Server disk backup was queued synchronously above, before any async storage work.
+  if (options.awaitServer) {
+    await serverBackupWrite;
+  }
 };
 
 /**
@@ -1454,6 +1461,9 @@ export const mergeUITestingReportsWithBackup = (
   deletedIds: Set<string> = new Set(),
   backupReports: any[] = []
 ): any[] => {
+  const isFirestoreTruncated = (value: any): boolean =>
+    typeof value === 'string' && /\.\.\.\s*\[(?:trimmed|truncated) for Firestore\]/i.test(value);
+
   const reportMap = new Map<string, any>();
   (currentReports || []).forEach(r => {
     if (r && r.id && !deletedIds.has(r.id)) {
@@ -1481,6 +1491,9 @@ export const mergeUITestingReportsWithBackup = (
         const bestCorrected = (existing.correctedImage && existing.correctedImage.startsWith('data:'))
           ? existing.correctedImage
           : (r.correctedImage || existing.correctedImage || '');
+        const bestReport = isFirestoreTruncated(existing.report) && !isFirestoreTruncated(r.report)
+          ? (r.report || existing.report)
+          : (existing.report || r.report);
 
         reportMap.set(r.id, {
           ...r,
@@ -1490,7 +1503,7 @@ export const mergeUITestingReportsWithBackup = (
           visualDefectsScreenshots: bestVD,
           correctedImage: bestCorrected,
           folderId: existing.folderId || r.folderId,
-          report: existing.report || r.report,
+          report: bestReport,
           name: existing.name || r.name
         });
       }

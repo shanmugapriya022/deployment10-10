@@ -416,6 +416,9 @@ async function clientProxy(functionName: string, args: any[]): Promise<any> {
         docPageCount,
         inputCount,
         isBulkContinuation,
+        // The Script Generator charges once for the completed POM suite; its
+        // batched and coverage-repair AI requests must not each charge credits.
+        skipCreditLogging: functionName === 'generateAutomationScript' && Boolean(args?.[2]?.skipCreditLogging),
         planType: currentProjPlan?.planType || 'Paid',
         clientPlanHint: currentProjPlan?.planType || 'Paid'
       };

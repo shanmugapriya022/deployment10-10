@@ -123,6 +123,7 @@ import { extractApkBundle } from '../services/apkExtractorService';
 import { detectAppArchetype } from '../services/mobileAppDefinitionService';
 import { addTokenLog } from '../services/tokenConsumptionService';
 import { addDeletedIds } from '../services/projectService';
+import { saveProjectBackup } from '../services/storageBackupService';
 import { 
   BddDocumentParsed, 
   parseBddDocument, 
@@ -5074,16 +5075,23 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
       const updatedFlows = Array.from(existingFlowsMap.values());
       setFlows(updatedFlows);
 
-      await awaitWithTimeout(
-        onUpdateProject({
-          ...project,
-          recordedFlows: updatedFlows,
-          automationScripts: updatedScripts,
-          automationFolders: updatedFolders
-        }),
-        15_000,
-        'Scripts were generated, but syncing them to the project is taking too long. The local project state has been updated; please check synchronization before retrying.'
-      );
+      const updatedProject = {
+        ...project,
+        recordedFlows: updatedFlows,
+        automationScripts: updatedScripts,
+        automationFolders: updatedFolders
+      };
+
+      // Confirm the full flow and generated files reached the durable project backup
+      // before showing success. Firestore can be slow or prune large project records.
+      await saveProjectBackup(updatedProject, { awaitServer: true });
+
+      // updateProject applies the project to app state and starts Firestore sync. Do not
+      // make script generation appear to fail just because that cloud sync is delayed.
+      void onUpdateProject(updatedProject).catch(error => {
+        console.warn('Generated script is saved in the project backup; Firestore sync is pending:', error);
+        toast.info('Scripts are saved. Cloud synchronization is still pending.');
+      });
 
       toast.success(`${selectedTool} (${selectedLanguage}) ${selectedFramework} project generated and saved to Generated Scripts!`);
     } catch (error) {

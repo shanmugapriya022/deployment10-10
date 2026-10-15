@@ -555,6 +555,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
 
   // Generating State
   const [isGenerating, setIsGenerating] = useState(false);
+  const generationInProgressRef = useRef(false);
 
   // Unsaved / Draft Scripts (Generated but pending manual save by user)
   const [unsavedScripts, setUnsavedScripts] = useState<AutomationScript[]>(() => {
@@ -2257,6 +2258,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
 
   // Handle Script Generation
   const handleGenerateScript = async () => {
+    if (generationInProgressRef.current) return;
     const deletedIds = getDeletedIds(project.id);
     let targetCases: TestCase[] = [];
     const seenTargetIds = new Set<string>();
@@ -2371,6 +2373,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
       type: 'info'
     });
 
+    generationInProgressRef.current = true;
     setIsGenerating(true);
 
     const isBddRequested = 
@@ -2422,6 +2425,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
         },
         instructionText,
         architecturalInstructions: instructionText,
+        skipCreditLogging: true,
         isBdd: isBddRequested,
         generateBdd: isBddRequested,
         pomStructure: true,
@@ -2437,8 +2441,8 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
         contextPayload.videoFileName = videoData.fileName;
       }
 
-      // Validate project credit permission before starting synthesis (50 credits deducted upon script generation)
-      const permission = await canPerformAction(project.id, 'automation_script', 'analysis', project.name);
+      // Charge once per completed POM suite, regardless of AI batching or retries.
+      const permission = await canPerformAction(project.id, 'automation_script_generation', 'analysis', project.name);
       if (!permission.allowed) {
         toast.error(permission.reason || 'Project credits exhausted. Please subscribe to continue.');
         setIsGenerating(false);
@@ -2454,6 +2458,17 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
 
       if (!generatedCode || generatedCode.trim().length === 0) {
         throw new Error('No script code received from AI generator.');
+      }
+
+      const creditResult = await deductProjectCredits(
+        project.id,
+        'automation_script_generation',
+        'analysis',
+        { name: user.name, email: user.email },
+        { projectName: project.name, details: 'Generate POM Scripts' }
+      );
+      if (!creditResult.success) {
+        throw new Error(creditResult.error || 'Unable to deduct credits for POM script generation.');
       }
 
       const selectedToolName = isBddRequested ? (selectedTool.includes('BDD') ? selectedTool : `${selectedTool} BDD`) : selectedTool;
@@ -2551,6 +2566,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
       toast.error(`Generation error: ${err.message || 'Failed to synthesize script'}`);
     } finally {
       setIsGenerating(false);
+      generationInProgressRef.current = false;
     }
   };
 
@@ -2689,12 +2705,6 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
       localStorage.setItem(`automatiqa_project_backup_${project.id}`, JSON.stringify(updatedProject));
     } catch (e) {}
 
-    try {
-      await Promise.resolve(onUpdateProject(updatedProject));
-    } catch (err) {
-      toast.error('Could not save the script. Please try again.');
-      return;
-    }
     setUnsavedScripts(prev => prev.filter(s => s.id !== script.id));
 
     // Make sure the destination folder is expanded in Script Folders tab or Imported tab
@@ -2707,8 +2717,18 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
     }
     setSelectedRepositoryFolder(finalFolderName);
 
+    // Close as soon as the script is staged in the local project backup. The
+    // parent update also performs cloud sync, which can take much longer.
     setSaveModalScript(null);
     toast.success(`Script "${trimmedTitle}" saved under folder "${finalFolderName}"!`);
+
+    void Promise.resolve()
+      .then(() => onUpdateProject(updatedProject))
+      .catch(err => {
+        console.error('Saved script is waiting for project synchronization:', err);
+        toast.info('The script is saved locally. Cloud synchronization is still pending.');
+      });
+
     await logActivity(user.email, user.name, `Saved Script: ${trimmedTitle} into folder ${finalFolderName}`, project.id, project.name);
   };
 

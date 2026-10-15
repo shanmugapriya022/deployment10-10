@@ -10503,6 +10503,10 @@ function calculateCreditsConsumedServer(
   
   const f = (featureName || '').toLowerCase().trim();
 
+  // A Script Generator click can issue several AI requests for batching and
+  // coverage repair, but the user is charged once for the completed POM suite.
+  if (f === 'automation_script_generation') return actionType === 'export' ? 50 : 100;
+
   // 1. AI User Stories Generation: Trial (5 / 20), Paid (5 / 10)
   if (f.includes('user_stories') || f.includes('user_story') || f.includes('user stor') || f.includes('story') || f.includes('stories')) {
     if (actionType === 'export') {
@@ -13068,6 +13072,7 @@ async function recordTokenLogServer(params: {
   app.post(["/api/ai/testcases/start-job", "/api/testcases/start-job"], async (req, res) => {
     try {
       const { projectId, projectName, userId, fileId, fileName, loginContext, aiInstructions, idempotencyKey } = req.body;
+      const deferCreditDeduction = Boolean(req.body.deferCreditDeduction);
       const creditFeatureName = req.body.creditFeatureName === 'AI Test Scenario generation'
         ? 'AI Test Scenario generation'
         : 'AI Test Cases generation';
@@ -13163,6 +13168,7 @@ async function recordTokenLogServer(params: {
         loginContext,
         aiInstructions,
         onCompleteCreditDeduction: async (completedJob) => {
+          if (deferCreditDeduction) return;
           try {
             await deductProjectCreditsServer({
               projectIdOrName: projectId || "default_project",

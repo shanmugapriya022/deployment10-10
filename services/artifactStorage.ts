@@ -843,6 +843,8 @@ export async function hydrateReportArtifacts(item: any): Promise<any> {
   const sanitizedId = String(item.id).replace(/[^a-zA-Z0-9_\-]/g, '_');
   const cached = (await getArtifact(`report_${sanitizedId}`)) || (await getArtifact(`perm_report_${sanitizedId}`));
   const merged = { ...item };
+  const isFirestoreTruncated = (value: any): boolean =>
+    typeof value === 'string' && /\.\.\.\s*\[(?:trimmed|truncated) for Firestore\]/i.test(value);
 
   // Helper to safely extract image strings from arrays (supporting strings and object items)
   const cleanList = (arr: any): string[] => {
@@ -935,23 +937,23 @@ export async function hydrateReportArtifacts(item: any): Promise<any> {
       merged.promptInputs = cached.promptInputs;
     }
 
-    if (!merged.report && cached.report) {
+    if ((!merged.report || isFirestoreTruncated(merged.report)) && cached.report && !isFirestoreTruncated(cached.report)) {
       merged.report = cached.report;
     }
 
-    if (!merged.analysisReport && cached.analysisReport) {
+    if ((!merged.analysisReport || isFirestoreTruncated(merged.analysisReport)) && cached.analysisReport && !isFirestoreTruncated(cached.analysisReport)) {
       merged.analysisReport = cached.analysisReport;
     }
 
-    if (!merged.comparisonReport && cached.comparisonReport) {
+    if ((!merged.comparisonReport || isFirestoreTruncated(merged.comparisonReport)) && cached.comparisonReport && !isFirestoreTruncated(cached.comparisonReport)) {
       merged.comparisonReport = cached.comparisonReport;
     }
 
-    if (!merged.correctedReport && cached.correctedReport) {
+    if ((!merged.correctedReport || isFirestoreTruncated(merged.correctedReport)) && cached.correctedReport && !isFirestoreTruncated(cached.correctedReport)) {
       merged.correctedReport = cached.correctedReport;
     }
 
-    if (!merged.resolutionGuide && cached.resolutionGuide) {
+    if ((!merged.resolutionGuide || isFirestoreTruncated(merged.resolutionGuide)) && cached.resolutionGuide && !isFirestoreTruncated(cached.resolutionGuide)) {
       merged.resolutionGuide = cached.resolutionGuide;
     }
 

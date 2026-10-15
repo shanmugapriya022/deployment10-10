@@ -1441,6 +1441,9 @@ const UITesting: React.FC<UITestingProps> = ({ project, user, onUpdateProject })
 
     const chooseValue = (rawVal: any, hydVal: any) => {
       if (Array.isArray(hydVal) && hydVal.length > 0 && (!Array.isArray(rawVal) || rawVal.length === 0)) return hydVal;
+      const rawIsTruncated = typeof rawVal === 'string' && /\.\.\.\s*\[(?:trimmed|truncated) for Firestore\]/i.test(rawVal);
+      const hydratedIsComplete = typeof hydVal === 'string' && hydVal.trim().length > 0 && !/\.\.\.\s*\[(?:trimmed|truncated) for Firestore\]/i.test(hydVal);
+      if (rawIsTruncated && hydratedIsComplete) return hydVal;
       if (typeof hydVal === 'string' && hydVal.trim().length > 0 && (!rawVal || (typeof rawVal === 'string' && rawVal.trim().length === 0))) return hydVal;
       return rawVal !== undefined && rawVal !== null && rawVal !== '' ? rawVal : hydVal;
     };
@@ -1543,7 +1546,7 @@ const UITesting: React.FC<UITestingProps> = ({ project, user, onUpdateProject })
           (res.hydratedReports || []).forEach(r => {
             if (r?.id) {
               const existing = map.get(r.id);
-              map.set(r.id, existing ? { ...r, ...existing, folderId: existing.folderId || r.folderId } : r);
+              map.set(r.id, existing ? mergeRepoRecords(r, existing) : r);
             }
           });
           return Array.from(map.values());
@@ -1555,7 +1558,7 @@ const UITesting: React.FC<UITestingProps> = ({ project, user, onUpdateProject })
           (res.hydratedReviews || []).forEach(f => {
             if (f?.id) {
               const existing = map.get(f.id);
-              map.set(f.id, existing ? { ...f, ...existing, folderId: existing.folderId || f.folderId } : f);
+              map.set(f.id, existing ? mergeRepoRecords(f, existing) : f);
             }
           });
           return Array.from(map.values());
@@ -1567,7 +1570,7 @@ const UITesting: React.FC<UITestingProps> = ({ project, user, onUpdateProject })
           (res.hydratedComparisons || []).forEach(c => {
             if (c?.id) {
               const existing = map.get(c.id);
-              map.set(c.id, existing ? { ...c, ...existing, folderId: existing.folderId || c.folderId } : c);
+              map.set(c.id, existing ? mergeRepoRecords(c, existing) : c);
             }
           });
           return Array.from(map.values());

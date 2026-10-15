@@ -73,9 +73,10 @@ const triggerBlobDownloadFallback = (blob: Blob, filename: string) => {
 export const downloadExcel = async (
   data: Record<string, any>[],
   fileName: string,
-  sheetName: string = 'Sheet1'
+  sheetName: string = 'Sheet1',
+  creditAlreadyValidated: boolean = false
 ) => {
-  if (isProjectCreditExhausted()) {
+  if (!creditAlreadyValidated && isProjectCreditExhausted()) {
     toast.error("Project credit limit reached. Export Excel and Export CSV are restricted when available credits are exhausted.", {
       duration: 5000
     });
@@ -103,9 +104,10 @@ export const downloadExcel = async (
  */
 export const downloadCsv = (
   data: Record<string, any>[] | string,
-  fileName: string
+  fileName: string,
+  creditAlreadyValidated: boolean = false
 ) => {
-  if (isProjectCreditExhausted()) {
+  if (!creditAlreadyValidated && isProjectCreditExhausted()) {
     toast.error("Project credit limit reached. Export Excel and Export CSV are restricted when available credits are exhausted.", {
       duration: 5000
     });

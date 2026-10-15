@@ -174,6 +174,13 @@ export const FEATURE_CREDIT_RULES: Record<string, FeatureCreditRule> = {
     paid: { analysis: 50, export: 50 },
     description: 'Generate Page Object Model (POM) Playwright/Selenium/Cypress test automation scripts. Copy/export/push to Git.'
   },
+  automation_script_generation: {
+    featureKey: 'automation_script_generation',
+    displayName: 'Automation - POM script generation',
+    trial: { analysis: 100, export: 50 },
+    paid: { analysis: 100, export: 50 },
+    description: 'Generate a complete Page Object Model (POM) suite from selected test cases.'
+  },
   record_play_web: {
     featureKey: 'record_play_web',
     displayName: 'Automation - Record and play - Web app',
