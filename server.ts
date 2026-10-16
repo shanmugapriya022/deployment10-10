@@ -3366,11 +3366,40 @@ async function startServer() {
 
   // Admin Database & Auth Backup Synchronization
   app.post("/api/admin/sync-backup-state", async (req, res) => {
+    if (process.env.ENABLE_BACKUP_REPLICATION !== "true") {
+      return res.status(403).json({
+        success: false,
+        error: "Backup replication is disabled for this environment."
+      });
+    }
+
     try {
+      const tokenVerification = await verifyFirebaseTokenHeader(req);
+      if (!tokenVerification.authenticated || !tokenVerification.userEmail) {
+        return res.status(401).json({
+          success: false,
+          error: tokenVerification.error || "Authentication is required to run backup replication."
+        });
+      }
+
+      const userEmail = tokenVerification.userEmail.toLowerCase().trim();
+      let userRole = "";
+      if (adminDb) {
+        const userDoc = await adminDb.collection("users").doc(userEmail).get();
+        userRole = String(userDoc.data()?.role || "").toLowerCase().trim();
+      }
+      const isSuperAdmin =
+        ["shanmugapriya@qaoncloud.com", "vinuta@qaoncloud.com", "gomathy@qaoncloud.com"].includes(userEmail) ||
+        userRole === "super admin" ||
+        userRole === "super_admin";
+      if (!isSuperAdmin) {
+        return res.status(403).json({ success: false, error: "Super Admin access is required." });
+      }
+
       const result = await runFullReplication();
       res.json(result);
     } catch (err: any) {
-      res.status(500).json({ error: err?.message || String(err) });
+      res.status(500).json({ success: false, error: err?.message || String(err) });
     }
   });
 
@@ -4638,6 +4667,7 @@ async function startServer() {
 
       // 4. Load token logs with robust fallback across Admin Firestore, Client Firestore, and Local Disk Persistence
       let allLogs: any[] = [];
+      let firestoreReadSucceeded = false;
       const tokenLogsFilePath = path.join(process.cwd(), 'token_consumption_logs.json');
       let diskLogs: any[] = [];
       try {
@@ -4652,6 +4682,7 @@ async function startServer() {
         try {
           const logsSnap = await adminDb.collection('token_consumption_logs').orderBy('timestamp', 'desc').get();
           allLogs = logsSnap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+          firestoreReadSucceeded = true;
         } catch (adminErr: any) {
           const msg = adminErr?.message || String(adminErr);
           console.warn('[Credits Consumption] Admin Firestore query notice (engaging fallback):', msg);
@@ -4668,15 +4699,19 @@ async function startServer() {
           const q = query(logsRef, orderBy('timestamp', 'desc'));
           const snap = await getDocs(q);
           allLogs = snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+          firestoreReadSucceeded = true;
         } catch (clientErr: any) {
           console.warn('[Credits Consumption] Client Firestore query notice (using disk logs):', clientErr?.message || clientErr);
         }
       }
 
-      // 4c. Merge all logs with local disk backup
+      // 4c. Firestore is the shared source of truth across Cloud Run instances.
+      // Each instance has its own ephemeral disk file; merging that file into a
+      // successful Firestore read can make balances vary between requests.
+      // Use disk only when Firestore could not be read at all.
       const mergedLogsMap = new Map<string, any>();
-      diskLogs.forEach((l: any) => { if (l && l.id) mergedLogsMap.set(l.id, l); });
-      allLogs.forEach((l: any) => { if (l && l.id) mergedLogsMap.set(l.id, { ...mergedLogsMap.get(l.id), ...l }); });
+      const sourceLogs = firestoreReadSucceeded ? allLogs : diskLogs;
+      sourceLogs.forEach((l: any) => { if (l && l.id) mergedLogsMap.set(l.id, l); });
       allLogs = Array.from(mergedLogsMap.values());
       allLogs.sort((a: any, b: any) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime());
 
@@ -13160,7 +13195,8 @@ async function recordTokenLogServer(params: {
         fileName: cleanFileName,
         chunks,
         idempotencyKey: activeKey,
-        creditFeatureName
+        creditFeatureName,
+        deferCreditDeduction
       });
 
       // Launch async processing job through central rate controller
@@ -13282,7 +13318,7 @@ async function recordTokenLogServer(params: {
 
       executeLargeFileTestCaseJob(adminDb, jobId, chunks, {
         onCompleteCreditDeduction: async (completedJob) => {
-          if (!completedJob.creditDeducted) {
+          if (!jobData.deferCreditDeduction && !completedJob.creditDeducted) {
             try {
               await deductProjectCreditsServer({
                 projectIdOrName: jobData.projectId || "default_project",
@@ -15040,7 +15076,15 @@ RULES:
 
   server.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://0.0.0.0:${PORT}`);
-    startReplicationSchedule();
+    const enableBackupReplication =
+      process.env.ENABLE_BACKUP_REPLICATION === "true";
+
+    if (enableBackupReplication) {
+      console.log("[BackupReplication] Enabled");
+      startReplicationSchedule();
+    } else {
+      console.log("[BackupReplication] Disabled for this environment");
+    }
   });
 
   // Graceful shutdown handling for Cloud Run container lifecycle

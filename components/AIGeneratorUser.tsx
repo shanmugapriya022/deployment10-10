@@ -45,7 +45,11 @@ import { ScreenshotUploader, ScreenshotFile } from './ScreenshotUploader';
 import { ScreenshotGallery } from './ScreenshotGallery';
 import { calculateCapacityAndEstimates, getProjectCreditSummary } from '../services/tokenConsumptionService';
 import { canPerformAction, deductProjectCredits, deductProjectCreditsLocal } from '../services/creditService';
-import { downloadExcel, downloadCsv } from '../utils/exportUtils';
+import {
+  prepareExcelDownload,
+  prepareCsvDownload,
+  triggerPreparedDownload
+} from '../utils/exportUtils';
 import { ragEnrichPrompt, indexSingleItem } from '../services/ragService';
 import { RAGStatusBadge } from './RAGStatusBadge';
 import { VectorSearchResult } from '../types';
@@ -857,6 +861,38 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
     project.id, 'ai_user_stories', user, outputType, project.name
   );
 
+  const prepareStoryExport = async (
+    rows: Record<string, any>[],
+    fileName: string,
+    sheetName: string,
+    format: 'excel' | 'csv',
+    outputType: string,
+    readyMessage: string
+  ) => {
+    if (!await allowStoryExport(outputType)) return;
+
+    try {
+      const prepared = format === 'excel'
+        ? await prepareExcelDownload(rows, fileName, sheetName)
+        : prepareCsvDownload(rows, fileName);
+
+      toast(readyMessage, {
+        description: 'Click Download to save the file.',
+        duration: 60000,
+        action: {
+          label: 'Download',
+          onClick: () => {
+            triggerPreparedDownload(prepared);
+            toast.success('Download started.');
+          }
+        }
+      });
+    } catch (err) {
+      console.error('[AIGeneratorUser] Failed to prepare story export:', err);
+      toast.error(`Failed to prepare ${format === 'excel' ? 'Excel' : 'CSV'} file.`);
+    }
+  };
+
   const handleCopyToClipboard = async (id: string, field: string, value: string) => {
     if (!await allowStoryExport(`Copy User Story ${field}`)) return;
     navigator.clipboard.writeText(value);
@@ -1656,15 +1692,14 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
     });
 
     const safeFolderName = folder.summary.replace(/[^a-zA-Z0-9_-]/g, '_');
-    if (!await allowStoryExport(`Download User Stories Folder (${format.toUpperCase()})`)) return;
-
-    if (format === 'excel') {
-      await downloadExcel(exportData, `${safeFolderName}_User_Stories`, 'Folder User Stories', true);
-      toast.success(`Excel file for folder "${folder.summary}" downloaded successfully!`);
-    } else {
-      downloadCsv(exportData, `${safeFolderName}_User_Stories`, true);
-      toast.success(`CSV file for folder "${folder.summary}" downloaded successfully!`);
-    }
+    await prepareStoryExport(
+      exportData,
+      `${safeFolderName}_User_Stories`,
+      'Folder User Stories',
+      format,
+      `Download User Stories Folder (${format.toUpperCase()})`,
+      `${format === 'excel' ? 'Excel' : 'CSV'} file for folder "${folder.summary}" is ready.`
+    );
   };
 
   // Download Stories in a Subfolder (Excel or CSV)
@@ -1692,15 +1727,14 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
     }));
 
     const safeSubfolderName = subfolder.summary.replace(/[^a-zA-Z0-9_-]/g, '_');
-    if (!await allowStoryExport(`Download User Stories Subfolder (${format.toUpperCase()})`)) return;
-
-    if (format === 'excel') {
-      await downloadExcel(exportData, `Subfolder_${safeSubfolderName}_Stories`, 'Subfolder Stories', true);
-      toast.success(`Excel file for subfolder "${subfolder.summary}" downloaded successfully!`);
-    } else {
-      downloadCsv(exportData, `Subfolder_${safeSubfolderName}_Stories`, true);
-      toast.success(`CSV file for subfolder "${subfolder.summary}" downloaded successfully!`);
-    }
+    await prepareStoryExport(
+      exportData,
+      `Subfolder_${safeSubfolderName}_Stories`,
+      'Subfolder Stories',
+      format,
+      `Download User Stories Subfolder (${format.toUpperCase()})`,
+      `${format === 'excel' ? 'Excel' : 'CSV'} file for subfolder "${subfolder.summary}" is ready.`
+    );
   };
 
   // Download Single User Story
@@ -1716,14 +1750,14 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
       'Created At': story.createdAt ? new Date(story.createdAt).toLocaleString() : 'N/A'
     }];
     const safeId = (story.storyId || story.id || 'User_Story').replace(/[^a-zA-Z0-9_-]/g, '_');
-    if (!await allowStoryExport(`Download User Story (${format.toUpperCase()})`)) return;
-    if (format === 'excel') {
-      await downloadExcel(row, `${safeId}_Story`, 'Story Details', true);
-      toast.success(`User story ${story.storyId || ''} downloaded as Excel!`);
-    } else {
-      downloadCsv(row, `${safeId}_Story`, true);
-      toast.success(`User story ${story.storyId || ''} downloaded as CSV!`);
-    }
+    await prepareStoryExport(
+      row,
+      `${safeId}_Story`,
+      'Story Details',
+      format,
+      `Download User Story (${format.toUpperCase()})`,
+      `User story ${story.storyId || ''} is ready as ${format.toUpperCase()}.`
+    );
   };
 
   // Download Selected Stories
@@ -1743,15 +1777,14 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
       'Created At': s.createdAt ? new Date(s.createdAt).toLocaleString() : 'N/A'
     }));
 
-    if (!await allowStoryExport(`Download Selected User Stories (${format.toUpperCase()})`)) return;
-
-    if (format === 'excel') {
-      await downloadExcel(rows, `${project.name.replace(/\s+/g, '_')}_Selected_Stories`, 'Selected Stories', true);
-      toast.success(`Downloaded ${checkedStories.length} stories as Excel!`);
-    } else {
-      downloadCsv(rows, `${project.name.replace(/\s+/g, '_')}_Selected_Stories`, true);
-      toast.success(`Downloaded ${checkedStories.length} stories as CSV!`);
-    }
+    await prepareStoryExport(
+      rows,
+      `${project.name.replace(/\s+/g, '_')}_Selected_Stories`,
+      'Selected Stories',
+      format,
+      `Download Selected User Stories (${format.toUpperCase()})`,
+      `${checkedStories.length} stories are ready as ${format.toUpperCase()}.`
+    );
   };
 
   const handleBulkDelete = () => {
@@ -1807,10 +1840,14 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
       'Created At': s.createdAt ? new Date(s.createdAt).toLocaleString() : 'N/A'
     }));
 
-    if (!await allowStoryExport('Download User Stories (EXCEL)')) return;
-
-    await downloadExcel(rows, `${project.name.replace(/\s+/g, '_')}_User_Stories`, 'User Stories', true);
-    toast.success(`Exported ${storiesToExport.length} user stories to Excel!`);
+    await prepareStoryExport(
+      rows,
+      `${project.name.replace(/\s+/g, '_')}_User_Stories`,
+      'User Stories',
+      'excel',
+      'Download User Stories (EXCEL)',
+      `${storiesToExport.length} user stories are ready as Excel.`
+    );
   };
 
   // Export All to CSV
@@ -1830,10 +1867,14 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
       'Created At': s.createdAt ? new Date(s.createdAt).toLocaleString() : 'N/A'
     }));
 
-    if (!await allowStoryExport('Download User Stories (CSV)')) return;
-
-    downloadCsv(rows, `${project.name.toLowerCase().replace(/\s+/g, '_')}_user_stories`, true);
-    toast.success(`Exported ${storiesToExport.length} user stories to CSV!`);
+    await prepareStoryExport(
+      rows,
+      `${project.name.toLowerCase().replace(/\s+/g, '_')}_user_stories`,
+      'User Stories',
+      'csv',
+      'Download User Stories (CSV)',
+      `${storiesToExport.length} user stories are ready as CSV.`
+    );
   };
 
   const areAllStoriesChecked = useMemo(() => {

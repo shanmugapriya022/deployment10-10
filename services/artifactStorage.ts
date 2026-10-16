@@ -701,6 +701,7 @@ export interface ReportArtifactsBundle {
   standardRequirement?: any;
   projectId?: string;
   folderId?: string;
+  artifactTextUrl?: string;
 }
 
 /**
@@ -827,6 +828,34 @@ export async function saveReportArtifacts(
     correctedScreenshots: permCorrectedScreenshots
   };
 
+  // Keep long report text outside the size-limited project document. The
+  // project stores this durable URL while Firestore keeps only its compacted
+  // copy; hydration restores the complete text when the report is opened.
+  const reportTextFields = [
+    'report',
+    'analysisReport',
+    'comparisonReport',
+    'correctedReport',
+    'resolutionGuide'
+  ] as const;
+  const reportTextPayload: Record<string, string> = {};
+  reportTextFields.forEach(field => {
+    const value = (artifacts as any)[field];
+    if (typeof value === 'string' && value.length > 0) reportTextPayload[field] = value;
+  });
+  if (Object.keys(reportTextPayload).length > 0) {
+    try {
+      const projectPath = (targetProjectId || 'unassigned').replace(/[^a-zA-Z0-9_\-]/g, '_');
+      const textPath = `ui_testing_reports/${projectPath}/${sanitizedId}_${Date.now()}.json`;
+      const textRef = ref(storage, textPath);
+      const textBlob = new Blob([JSON.stringify(reportTextPayload)], { type: 'application/json' });
+      const textUpload = await uploadBytes(textRef, textBlob, { contentType: 'application/json' });
+      permanentBundle.artifactTextUrl = await getDownloadURL(textUpload.ref);
+    } catch (textStorageErr) {
+      console.warn('[ArtifactStorage] Full report text upload notice; retaining local backup:', textStorageErr);
+    }
+  }
+
   // Also save the permanent bundle record
   await saveArtifact(`perm_report_${sanitizedId}`, permanentBundle);
 
@@ -841,7 +870,20 @@ export async function hydrateReportArtifacts(item: any): Promise<any> {
   if (!item || !item.id) return item;
 
   const sanitizedId = String(item.id).replace(/[^a-zA-Z0-9_\-]/g, '_');
-  const cached = (await getArtifact(`report_${sanitizedId}`)) || (await getArtifact(`perm_report_${sanitizedId}`));
+  let cached = (await getArtifact(`report_${sanitizedId}`)) || (await getArtifact(`perm_report_${sanitizedId}`));
+  if (item.artifactTextUrl && /^https?:\/\//i.test(item.artifactTextUrl)) {
+    try {
+      const response = await fetch(item.artifactTextUrl, { cache: 'no-store' });
+      if (response.ok) {
+        const fullText = await response.json();
+        if (fullText && typeof fullText === 'object') {
+          cached = { ...(cached || {}), ...fullText };
+        }
+      }
+    } catch (textFetchErr) {
+      console.warn('[ArtifactStorage] Full report text download notice:', textFetchErr);
+    }
+  }
   const merged = { ...item };
   const isFirestoreTruncated = (value: any): boolean =>
     typeof value === 'string' && /\.\.\.\s*\[(?:trimmed|truncated) for Firestore\]/i.test(value);

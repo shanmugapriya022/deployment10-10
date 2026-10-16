@@ -416,6 +416,7 @@ export interface UITestingReport {
   timestamp: string;
   folderId?: string;
   inputId?: string;
+  artifactTextUrl?: string;
 }
 
 export interface UITestingFolder {
@@ -440,6 +441,7 @@ export interface FigmaDesignReview {
   correctedImage?: string | null;
   timestamp: string;
   folderId?: string;
+  artifactTextUrl?: string;
 }
 
 export interface UIComparisonReport {
@@ -461,6 +463,7 @@ export interface UIComparisonReport {
   correctedImage?: string | null;
   timestamp: string;
   folderId?: string;
+  artifactTextUrl?: string;
 }
 
 export type LaunchDiagnosticCode =

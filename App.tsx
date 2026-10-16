@@ -966,14 +966,9 @@ const App: React.FC = () => {
         let cleanAutomationFolders = Array.isArray(p.automationFolders) 
           ? p.automationFolders.filter((f: any) => {
               if (!f || deletedIds.has(f.id)) return false;
-              // Clean up empty folders with 0 scripts that originated from test case approvals
-              if (f.type === 'script_generator' && !(f as any).isUserCreatedScriptFolder) {
-                const fName = (f.name || '').trim().toLowerCase();
-                const hasScripts = cleanAutomationScripts.some(
-                  (s: any) => (s.folderName || '').trim().toLowerCase() === fName || s.folderId === f.id
-                );
-                if (!hasScripts) return false;
-              }
+              // Preserve saved folders even when a Firestore snapshot contains
+              // fewer scripts than the durable backup. A temporary mismatch
+              // must never be interpreted as a user deletion.
               return true;
             }) 
           : [];

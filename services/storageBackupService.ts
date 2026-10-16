@@ -164,7 +164,11 @@ export const syncFolderReferences = <T extends Partial<Project>>(project: T): T 
 
   for (const folder of rawFolders) {
     if (!folder || !folder.name) continue;
-    const folderType = folder.type || 'flow';
+    // Script Generator has historically written both `script` and
+    // `script_generator`. Treat those as one repository type when deduplicating
+    // folders, otherwise a Firestore copy and a local backup can be assigned
+    // different IDs during a restore and scripts become detached from folders.
+    const folderType = folder.type === 'script_generator' ? 'script' : (folder.type || 'flow');
     const normName = folder.name.trim().toLowerCase();
     const plat = folder.platform || 'all';
     const key = `${folderType}___${normName}___${plat}`;
@@ -983,7 +987,9 @@ export const mergeFoldersWithBackup = (
   const processFolder = (f: any) => {
     if (!f || !f.id || deletedIds.has(f.id)) return;
     const normName = (f.name || '').trim().toLowerCase();
-    const type = f.type || 'flow';
+    // Older Script Generator folders use `script_generator`; canonicalize it
+    // so backup and Firestore copies merge as the same folder.
+    const type = f.type === 'script_generator' ? 'script' : (f.type || 'flow');
     const plat = f.platform || 'web';
     const nameKey = `${type}___${normName}___${plat}`;
 
@@ -995,7 +1001,7 @@ export const mergeFoldersWithBackup = (
           ...f,
           ...existing,
           name: existing.name || f.name,
-          type: existing.type || type,
+          type,
           platform: existing.platform || plat
         });
       } else {
@@ -1015,8 +1021,9 @@ export const mergeFoldersWithBackup = (
         const canonical = seenNames.get(nameKey);
         Object.assign(canonical, f, { id: canonical.id, name: canonical.name });
       } else {
-        folderMap.set(f.id, { ...f });
-        seenNames.set(nameKey, f);
+        const normalizedFolder = { ...f, type };
+        folderMap.set(f.id, normalizedFolder);
+        seenNames.set(nameKey, normalizedFolder);
       }
     }
   };

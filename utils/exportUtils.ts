@@ -1,8 +1,12 @@
 import { saveAs } from 'file-saver';
 import ExcelJS from 'exceljs';
-import { downloadXlsxWorkbook } from './spreadsheetUtils';
 import { getProjectCreditSummary, getProjectPlanSync } from '../services/tokenConsumptionService';
 import { toast } from 'sonner';
+
+export interface PreparedExportDownload {
+  blob: Blob;
+  fileName: string;
+}
 
 /**
  * Checks if the current or specified project has exhausted its credit pool or is expired/gated.
@@ -67,6 +71,54 @@ const triggerBlobDownloadFallback = (blob: Blob, filename: string) => {
   }
 };
 
+/** Builds an Excel file without triggering a browser download. */
+export const prepareExcelDownload = async (
+  data: Record<string, any>[],
+  fileName: string,
+  sheetName: string = 'Sheet1'
+): Promise<PreparedExportDownload> => {
+  const safeName = fileName.endsWith('.xlsx') ? fileName : `${fileName}.xlsx`;
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = workbook.addWorksheet(sheetName.slice(0, 31));
+  if (data.length > 0) {
+    const headers = Object.keys(data[0]);
+    worksheet.addRow(headers);
+    data.forEach(item => worksheet.addRow(headers.map(header => item[header])));
+  }
+
+  const buffer = await workbook.xlsx.writeBuffer();
+  const arrayBuffer = new Uint8Array(buffer).slice().buffer as ArrayBuffer;
+  return {
+    blob: new Blob([arrayBuffer], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    }),
+    fileName: safeName
+  };
+};
+
+/** Builds a CSV file without triggering a browser download. */
+export const prepareCsvDownload = (
+  data: Record<string, any>[] | string,
+  fileName: string
+): PreparedExportDownload => {
+  const safeName = fileName.endsWith('.csv') ? fileName : `${fileName}.csv`;
+  const csvContent = typeof data === 'string' ? data : jsonToCsvString(data);
+  return {
+    blob: new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' }),
+    fileName: safeName
+  };
+};
+
+/** Starts a prepared download directly from a fresh user click. */
+export const triggerPreparedDownload = ({ blob, fileName }: PreparedExportDownload): void => {
+  try {
+    saveAs(blob, fileName);
+  } catch (saveAsErr) {
+    console.warn('[exportUtils] saveAs failed, attempting DOM anchor fallback:', saveAsErr);
+    triggerBlobDownloadFallback(blob, fileName);
+  }
+};
+
 /**
  * Downloads data as an Excel (.xlsx) file
  */
@@ -85,14 +137,8 @@ export const downloadExcel = async (
 
   const safeName = fileName.endsWith('.xlsx') ? fileName : `${fileName}.xlsx`;
   try {
-    const workbook = new ExcelJS.Workbook();
-    const worksheet = workbook.addWorksheet(sheetName.slice(0, 31));
-    if (data.length > 0) {
-      const headers = Object.keys(data[0]);
-      worksheet.addRow(headers);
-      data.forEach(item => worksheet.addRow(headers.map(header => item[header])));
-    }
-    await downloadXlsxWorkbook(workbook, safeName);
+    const prepared = await prepareExcelDownload(data, safeName, sheetName);
+    triggerPreparedDownload(prepared);
   } catch (err) {
     console.error('[exportUtils] Failed to generate Excel file:', err);
     toast.error('Failed to generate Excel file.');
@@ -114,20 +160,8 @@ export const downloadCsv = (
     return;
   }
 
-  const safeName = fileName.endsWith('.csv') ? fileName : `${fileName}.csv`;
   try {
-    const csvContent = typeof data === 'string' ? data : jsonToCsvString(data);
-    // Include UTF-8 BOM so Excel and spreadsheet apps display special characters and newlines correctly
-    const blob = new Blob(['\uFEFF' + csvContent], {
-      type: 'text/csv;charset=utf-8;'
-    });
-
-    try {
-      saveAs(blob, safeName);
-    } catch (saveAsErr) {
-      console.warn('[exportUtils] saveAs failed, attempting DOM anchor fallback:', saveAsErr);
-      triggerBlobDownloadFallback(blob, safeName);
-    }
+    triggerPreparedDownload(prepareCsvDownload(data, fileName));
   } catch (err) {
     console.error('[exportUtils] Failed to generate CSV file:', err);
     throw err;

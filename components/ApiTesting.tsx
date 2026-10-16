@@ -456,6 +456,33 @@ const ApiTesting: React.FC<ApiTestingProps> = ({ project, user, onUpdateProject 
   useEffect(() => { projectRef.current = project; }, [project]);
   const lastSavedDataRef = useRef<string>('');
 
+  // The legacy API scenario detector also recognizes records by folder name,
+  // which can pull AI scenario folders and test-case artifacts into this list.
+  // Show only records with explicit API scenario metadata here.
+  const apiScenarioCards = useMemo(() => (project.apiScenarios || []).filter(sc => {
+    if (!sc) return false;
+    const scenarioType = (sc.scenarioId || '').toUpperCase();
+    const moduleName = (sc.moduleName || '').toLowerCase().trim();
+    if (
+      sc.isFolder ||
+      ['SCENARIO_FOLDER', 'TESTCASE_FOLDER', 'MANUAL_FOLDER', 'INPUT_SOURCE', 'SCRIPT_GENERATOR_FOLDER'].includes(scenarioType) ||
+      (sc as any).isTestCase ||
+      (sc as any).testCaseId ||
+      moduleName.includes('test case')
+    ) return false;
+
+    const hasExplicitApiIdentity = Boolean(
+      sc.isApiScenario ||
+      moduleName === 'api testing' ||
+      scenarioType.startsWith('API-') ||
+      scenarioType.startsWith('TS-API-') ||
+      scenarioType.startsWith('API_') ||
+      scenarioType.includes('-API-') ||
+      (sc.appUrl && /^\[(GET|POST|PUT|PATCH|DELETE)\s/i.test(sc.description || ''))
+    );
+    return hasExplicitApiIdentity;
+  }), [project.apiScenarios]);
+
   const methods = {
     GET: 'text-indigo-600',
     POST: 'text-emerald-600',
@@ -1623,9 +1650,9 @@ const ApiTesting: React.FC<ApiTestingProps> = ({ project, user, onUpdateProject 
           <button onClick={() => setSidebarView('workspace')} className={`flex-1 py-2 rounded-xl text-[10px] font-black uppercase transition-all ${sidebarView === 'workspace' ? 'bg-white shadow-md text-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}>Workspace</button>
           <button onClick={() => setSidebarView('scenarios')} className={`flex-1 py-2 rounded-xl text-[10px] font-black uppercase transition-all flex items-center justify-center gap-1 ${sidebarView === 'scenarios' ? 'bg-white shadow-md text-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}>
             Scenarios
-            {(project.apiScenarios && project.apiScenarios.length > 0) && (
+            {apiScenarioCards.length > 0 && (
               <span className="px-1.5 py-0.5 bg-indigo-100 text-indigo-700 text-[8px] font-bold rounded-full leading-none">
-                {project.apiScenarios.length}
+                {apiScenarioCards.length}
               </span>
             )}
           </button>
@@ -1640,17 +1667,17 @@ const ApiTesting: React.FC<ApiTestingProps> = ({ project, user, onUpdateProject 
           {sidebarView === 'scenarios' ? (
             <div className="space-y-2 p-1">
               <div className="px-2 py-1 flex items-center justify-between text-[10px] font-black uppercase tracking-wider text-slate-500 border-b border-slate-100 pb-2">
-                <span>API Scenarios ({(project.apiScenarios || []).length})</span>
+                <span>API Scenarios ({apiScenarioCards.length})</span>
                 <span className="text-[9px] text-indigo-600 bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded-full font-bold">API Isolated</span>
               </div>
-              {(project.apiScenarios || []).length === 0 ? (
+              {apiScenarioCards.length === 0 ? (
                 <div className="p-6 text-center text-slate-400">
                   <Beaker size={28} className="mx-auto mb-2 opacity-40 text-indigo-500" />
                   <p className="text-[11px] font-bold text-slate-700 uppercase tracking-tight">No API Scenarios Yet</p>
                   <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">Click &quot;Save Response&quot; or &quot;AI Test Scenarios&quot; after executing an API call to generate scenarios displayed exclusively in API Testing.</p>
                 </div>
               ) : (
-                (project.apiScenarios || []).map(sc => (
+                apiScenarioCards.map(sc => (
                   <div 
                     key={sc.id} 
                     onClick={() => handleSelectApiScenario(sc)}

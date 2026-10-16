@@ -1451,6 +1451,7 @@ const UITesting: React.FC<UITestingProps> = ({ project, user, onUpdateProject })
     return {
       ...hydratedItem,
       ...rawItem,
+      artifactTextUrl: rawItem.artifactTextUrl || hydratedItem.artifactTextUrl,
       folderId: rawItem.folderId || hydratedItem.folderId,
       report: chooseValue(rawItem.report, hydratedItem.report),
       analysisReport: chooseValue(rawItem.analysisReport, hydratedItem.analysisReport),
@@ -5112,6 +5113,7 @@ ${bodyHtml}
       // Persist full fidelity artifact bundle to server disk & IndexedDB
       let permanentBundle: any = {
         report,
+        correctedReport: isCorrectionActiveForCurrentAnalysis ? (correctedReport || undefined) : undefined,
         highlightedScreenshots: compHighlighted,
         visualDefectsScreenshots: compVisualDefects,
         correctedImage: isCorrectionActiveForCurrentAnalysis ? compCorrectedImg : undefined,
@@ -5148,6 +5150,7 @@ ${bodyHtml}
 
       const newReport: UITestingReport = {
         id: reportId,
+        artifactTextUrl: permanentBundle.artifactTextUrl,
         appName,
         name,
         report,
@@ -5279,6 +5282,7 @@ ${bodyHtml}
       // Persist to server disk & IndexedDB
       let permanentBundle: any = {
         analysisReport: figmaReviewReport,
+        correctedReport: figmaCorrectedReport || undefined,
         highlightedScreenshots: compHighlighted,
         visualDefectsScreenshots: compVisualDefects,
         images: inputImages,
@@ -5301,6 +5305,7 @@ ${bodyHtml}
 
       const newReview: FigmaDesignReview = {
         id: reviewId,
+        artifactTextUrl: permanentBundle.artifactTextUrl,
         appName,
         name,
         images: permanentBundle.images && permanentBundle.images.length > 0 ? permanentBundle.images : inputImages,
@@ -5424,6 +5429,7 @@ ${bodyHtml}
       // Persist full fidelity artifact bundle to server disk & IndexedDB
       let permanentBundle: any = {
         comparisonReport: compReport,
+        resolutionGuide: compResolutionGuide,
         highlightedScreenshots: compHighlighted,
         visualDefectsScreenshots: compVisualDefects,
         appScreenshots,
@@ -5458,6 +5464,7 @@ ${bodyHtml}
 
       const newComparison: UIComparisonReport = {
         id: comparisonId,
+        artifactTextUrl: permanentBundle.artifactTextUrl,
         appName,
         name,
         appScreenshots: permanentBundle.appScreenshots && permanentBundle.appScreenshots.length > 0 ? permanentBundle.appScreenshots : appScreenshots,
@@ -5598,15 +5605,22 @@ ${bodyHtml}
     // 2. Perform hydration in background and enrich images/videos asynchronously
     hydrateReportArtifacts(item).then((hydrated) => {
       if (hydrated) {
+        const primaryField = type === 'report' ? 'report' : type === 'figma' ? 'analysisReport' : 'comparisonReport';
+        const correctedField = type === 'comparison' ? 'resolutionGuide' : 'correctedReport';
+        const isFirestoreTrimmed = (value: any) =>
+          typeof value === 'string' && /\.\.\.\s*\[(?:trimmed|truncated) for Firestore\]/i.test(value);
         setSelectedRepoItem(prev => {
           if (prev && prev.item && (prev.item.id === item.id || prev.item.name === item.name)) {
             const enrichedItem = { ...prev.item, ...hydrated };
-            if (!prev.item.report && hydrated.report) {
-              setEditedItemContent(hydrated.report);
-            } else if (!prev.item.analysisReport && hydrated.analysisReport) {
-              setEditedItemContent(hydrated.analysisReport);
-            } else if (!prev.item.comparisonReport && hydrated.comparisonReport) {
-              setEditedItemContent(hydrated.comparisonReport);
+            const previousPrimary = prev.item[primaryField];
+            const hydratedPrimary = hydrated[primaryField];
+            if (isFirestoreTrimmed(previousPrimary) && typeof hydratedPrimary === 'string' && !isFirestoreTrimmed(hydratedPrimary)) {
+              setEditedItemContent(hydratedPrimary);
+            }
+            const previousCorrected = prev.item[correctedField];
+            const hydratedCorrected = hydrated[correctedField];
+            if (isFirestoreTrimmed(previousCorrected) && typeof hydratedCorrected === 'string' && !isFirestoreTrimmed(hydratedCorrected)) {
+              setEditedItemCorrected(hydratedCorrected);
             }
             return {
               type,

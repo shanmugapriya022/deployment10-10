@@ -1192,15 +1192,9 @@ export const pruneProjectData = (project: any): any => {
     if (Array.isArray(cloned.performanceScripts) && cloned.performanceScripts.length > 5) {
       cloned.performanceScripts = cloned.performanceScripts.slice(0, 5);
     }
-    if (Array.isArray(cloned.automationScripts) && cloned.automationScripts.length > 5) {
-      cloned.automationScripts = cloned.automationScripts.slice(0, 5);
-    }
-    if (Array.isArray(cloned.recordedFlows) && cloned.recordedFlows.length > 3) {
-      cloned.recordedFlows = cloned.recordedFlows.slice(0, 3);
-    }
-    if (Array.isArray(cloned.uploadVideoFlows) && cloned.uploadVideoFlows.length > 3) {
-      cloned.uploadVideoFlows = cloned.uploadVideoFlows.slice(0, 3);
-    }
+    // Never discard saved Record & Play repositories to satisfy the project
+    // document size limit. Their durable backup is written before pruning, and
+    // the compact recovery document below preserves metadata for every entry.
 
     // 12. ENFORCEABLE HARD CEILING: Truncate any long strings (> 1000 chars) anywhere in the document
     const hardTrimStrings = (o: any, maxLen = 1000): any => {
@@ -1365,9 +1359,7 @@ export const pruneProjectDataUltra = (project: any): any => {
     });
   }
   if (ultra.automationScripts && Array.isArray(ultra.automationScripts)) {
-    if (ultra.automationScripts.length > 8) {
-      ultra.automationScripts = ultra.automationScripts.slice(0, 8);
-    }
+    // Keep all script entries; only their large payloads are compacted above.
   }
   if (ultra.userStories && Array.isArray(ultra.userStories)) {
     if (ultra.userStories.length > 20) {
@@ -1715,7 +1707,7 @@ export const updateProjectFirestore = async (projectId: string, data: any, optio
                 allocatedUserEmails: finalizedData.allocatedUserEmails || [],
                 automationFolders: finalizedData.automationFolders || [],
                 uiTestingFolders: finalizedData.uiTestingFolders || [],
-                automationScripts: (finalizedData.automationScripts || []).slice(0, 10).map((s: any) => ({
+                automationScripts: (finalizedData.automationScripts || []).map((s: any) => ({
                   id: s.id,
                   title: s.title,
                   description: s.description || '',
@@ -1727,7 +1719,7 @@ export const updateProjectFirestore = async (projectId: string, data: any, optio
                   videoFlowId: s.videoFlowId,
                   files: (s.files || []).map((f: any) => ({ name: f.name, path: f.path }))
                 })),
-                uploadVideoFlows: (finalizedData.uploadVideoFlows || []).slice(0, 5).map((f: any) => ({
+                uploadVideoFlows: (finalizedData.uploadVideoFlows || []).map((f: any) => ({
                   id: f.id,
                   name: f.name,
                   description: f.description || '',
@@ -1738,7 +1730,7 @@ export const updateProjectFirestore = async (projectId: string, data: any, optio
                   createdAt: f.createdAt,
                   stepsCount: (f.steps || []).length
                 })),
-                recordedFlows: (finalizedData.recordedFlows || []).slice(0, 5).map((f: any) => ({
+                recordedFlows: (finalizedData.recordedFlows || []).map((f: any) => ({
                   id: f.id,
                   name: f.name,
                   folderId: f.folderId,

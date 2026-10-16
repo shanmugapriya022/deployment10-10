@@ -822,6 +822,19 @@ interface LastInputDetails {
     return [];
   };
 
+  const chargeScenarioGenerationOnce = async () => {
+    const result = await deductProjectCredits(
+      project.id,
+      'ai_scenarios',
+      'analysis',
+      { name: user.name, email: user.email },
+      { projectName: project.name }
+    );
+    if (!result.success) {
+      throw new Error(result.error || 'Could not charge credits for scenario generation.');
+    }
+  };
+
   const handleGenerate = async () => {
     if (isGenerating) return;
 
@@ -998,6 +1011,7 @@ interface LastInputDetails {
             fileId: uploadedFileId,
             fileName: docFileName,
             creditFeatureName: 'AI Test Scenario generation',
+            deferCreditDeduction: true,
             loginContext: cleanLoginContext,
             aiInstructions: combinedInstructions
           })
@@ -1086,7 +1100,8 @@ interface LastInputDetails {
                     const visualResults = await generateScenariosFromInput(visualInput, 'doc', {
                       aiInstructions,
                       screenshots,
-                      docFileName
+                      docFileName,
+                      skipCreditLogging: true
                     });
                     if (visualResults.length === 0) {
                       throw new Error('No scenarios were returned for the attached screenshots.');
@@ -1138,6 +1153,13 @@ interface LastInputDetails {
                   : 'Document scenarios generated; screenshot analysis failed.');
 
                 if (generatedScenarios.length > 0) {
+                  try {
+                    await chargeScenarioGenerationOnce();
+                  } catch (creditErr: any) {
+                    setIsGenerating(false);
+                    toast.error(creditErr?.message || 'Could not charge credits for scenario generation.');
+                    return;
+                  }
                   setNewlyGeneratedScenarios(generatedScenarios);
                   const updated = [...generatedScenarios, ...scenarios];
                   onUpdateProject({ ...project, scenarios: updated });
@@ -1241,6 +1263,7 @@ interface LastInputDetails {
             {
               aiInstructions,
               screenshots,
+              skipCreditLogging: true,
               targetUrl: targetWebsiteUrl,
               featureDescription: description.trim(),
               userStoryNumber: storyItem.storyNumber,
@@ -1356,6 +1379,7 @@ interface LastInputDetails {
           { 
             aiInstructions, 
             screenshots: generationScreenshots,
+            skipCreditLogging: true,
             targetUrl: activeTab === 'url' ? analysisUrl.trim() : activeTab === 'text' ? appUrl.trim() : '',
             featureDescription: description.trim(),
             userStoryNumber: singleStory?.storyNumber || '',
@@ -1443,7 +1467,11 @@ interface LastInputDetails {
         });
       }
 
-      // Generated scenarios are automatically recorded into Token Consumption via the AI service call
+      // Bill once for the full Generate action. Individual AI requests in a
+      // multi-story or document-plus-screenshot run are marked non-billable.
+      if (newScenarios.length > 0) {
+        await chargeScenarioGenerationOnce();
+      }
 
 
       // Create a single consolidated input source item containing all input documents and screenshots together
