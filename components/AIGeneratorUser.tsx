@@ -44,7 +44,7 @@ import { parseDocumentFile } from '../utils/docParser';
 import { ScreenshotUploader, ScreenshotFile } from './ScreenshotUploader';
 import { ScreenshotGallery } from './ScreenshotGallery';
 import { calculateCapacityAndEstimates, getProjectCreditSummary } from '../services/tokenConsumptionService';
-import { canPerformAction, deductProjectCredits, deductProjectCreditsLocal } from '../services/creditService';
+import { canPerformAction, deductProjectCredits, deductProjectCreditsLocal, deductExportCredits } from '../services/creditService';
 import {
   prepareExcelDownload,
   prepareCsvDownload,
