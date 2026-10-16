@@ -83,6 +83,30 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
   const [ragEnabled, setRagEnabled] = useState(true);
   const [retrievedRagChunks, setRetrievedRagChunks] = useState<VectorSearchResult[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const generationContextKey = `${project?.id || ''}::${user?.email?.trim().toLowerCase() || ''}`;
+  const generationContextRef = useRef(generationContextKey);
+  generationContextRef.current = generationContextKey;
+  const generationSequenceRef = useRef(0);
+  const activeGenerationRef = useRef<{ id: number; contextKey: string; toastId: string } | null>(null);
+
+  // A completion from an earlier user or project must not update this page's
+  // UI or show a success toast after the active context has changed.
+  useEffect(() => {
+    const request = activeGenerationRef.current;
+    if (request && request.contextKey !== generationContextKey) {
+      activeGenerationRef.current = null;
+      toast.dismiss(request.toastId);
+      setIsGenerating(false);
+    }
+
+    return () => {
+      const activeRequest = activeGenerationRef.current;
+      if (activeRequest?.contextKey === generationContextKey) {
+        activeGenerationRef.current = null;
+        toast.dismiss(activeRequest.toastId);
+      }
+    };
+  }, [generationContextKey]);
 
   useEffect(() => {
     const clearResolvedCreditError = (event: Event) => {
@@ -472,14 +496,38 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
 
   // Generate User Stories via Server API
   const handleGenerateUserStories = async () => {
-    if (isGenerating) return;
+    const currentContextKey = generationContextRef.current;
+    const previousRequest = activeGenerationRef.current;
+    if (previousRequest && previousRequest.contextKey !== currentContextKey) {
+      toast.dismiss(previousRequest.toastId);
+      activeGenerationRef.current = null;
+    }
+    if (isGenerating || activeGenerationRef.current) return;
     if (!selectedFile && screenshots.length === 0 && !additionalContext.trim()) {
       toast.error('Please upload a requirements document, attach screenshot(s), or enter guidelines/instructions.');
       return;
     }
 
+    const requestId = ++generationSequenceRef.current;
+    const loadingToastId = `ai-gen-${requestId}`;
+    activeGenerationRef.current = { id: requestId, contextKey: currentContextKey, toastId: loadingToastId };
+    const isCurrentGeneration = () =>
+      activeGenerationRef.current?.id === requestId &&
+      activeGenerationRef.current.contextKey === currentContextKey &&
+      generationContextRef.current === currentContextKey;
+
     // 1. GATEKEEPER: Check credit permissions BEFORE starting generation
-    const perm = await canPerformAction(project.id, 'ai_user_stories', 'analysis', project.name);
+    let perm;
+    try {
+      perm = await canPerformAction(project.id, 'ai_user_stories', 'analysis', project.name);
+    } catch (permissionError: any) {
+      if (isCurrentGeneration()) {
+        activeGenerationRef.current = null;
+        toast.error(permissionError?.message || 'Could not verify project credits. Please try again.');
+      }
+      return;
+    }
+    if (!isCurrentGeneration()) return;
     const projectSummary = getProjectCreditSummary(project.id, project.name);
 
     // canPerformAction checks the authoritative server balance and only falls
@@ -506,12 +554,13 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
           }
         }));
       }
+      activeGenerationRef.current = null;
       return;
     }
 
     setCreditNotAvailableError(null);
     setIsGenerating(true);
-    toast.loading('Analyzing requirements and generating user stories...', { id: 'ai-gen' });
+    toast.loading('Analyzing requirements and generating user stories...', { id: loadingToastId });
 
     try {
       let base64Content = '';
@@ -590,6 +639,7 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
         );
         serverDeducted = true;
       } catch (genErr: any) {
+        if (!isCurrentGeneration()) return;
         console.warn("[AIGeneratorUser] Primary server generation notice:", genErr?.message || genErr);
         const errStr = (genErr?.message || String(genErr)).toLowerCase();
         if (
@@ -600,7 +650,7 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
           errStr.includes('exhausted') ||
           errStr.includes('expired')
         ) {
-          toast.dismiss('ai-gen');
+          toast.dismiss(loadingToastId);
           setIsGenerating(false);
           const creditMsg = genErr?.message || `Credit not available for project "${project.name}". Please check the project credit balance and try again.`;
           setCreditNotAvailableError(creditMsg);
@@ -608,6 +658,8 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
           return;
         }
       }
+
+      if (!isCurrentGeneration()) return;
 
       // Resilient normalization of rawUserStories into an array
       let storiesToProcess: any[] = [];
@@ -683,6 +735,7 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
       }
 
       if (Array.isArray(storiesToProcess) && storiesToProcess.length > 0) {
+        if (!isCurrentGeneration()) return;
         // 1. Create primary input document story
         const inputSourceId = `US_INPUT-${Date.now()}`;
         let summaryText = selectedFile
@@ -783,7 +836,7 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
         setIsFolderSelectModalOpen(true);
         
         // Dismiss loading toast immediately and show success notification
-        toast.dismiss('ai-gen');
+        toast.dismiss(loadingToastId);
         toast.success(`Successfully generated ${generatedStories.length} user stories!`);
         setIsGenerating(false);
 
@@ -833,8 +886,9 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
         throw new Error('Could not generate user stories from the provided input.');
       }
     } catch (err: any) {
+      if (!isCurrentGeneration()) return;
       console.error(err);
-      toast.dismiss('ai-gen');
+      toast.dismiss(loadingToastId);
       const errStr = (err?.message || String(err)).toLowerCase();
       if (
         errStr.includes('credit') ||
@@ -851,8 +905,11 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
         toast.error(err.message || 'Failed to generate user stories. Please try again.');
       }
     } finally {
-      setIsGenerating(false);
-      toast.dismiss('ai-gen');
+      if (activeGenerationRef.current?.id === requestId) {
+        activeGenerationRef.current = null;
+        setIsGenerating(false);
+        toast.dismiss(loadingToastId);
+      }
     }
   };
 

@@ -1435,9 +1435,11 @@ export const getProjects = async (userEmail: string) => {
 
 const firestoreUpdateTimers = new Map<string, any>();
 const firestoreUpdateResolvers = new Map<string, Array<{ resolve: () => void; reject: (err: any) => void }>>();
+const firestoreProjectWriteQueues = new Map<string, Promise<void>>();
 
 const SCENARIO_RECORDS_COLLECTION = "scenario_records";
 const SCENARIO_CASES_COLLECTION = "scenario_cases";
+const SCENARIO_FRAMES_COLLECTION = "scenario_frames";
 const FIRESTORE_BATCH_SIZE = 400;
 
 const normalizedDeletionSet = (ids: unknown[]): Set<string> => {
@@ -1475,6 +1477,7 @@ export const saveScenariosToFirestore = async (
 
   const recordsRef = collection(db, "projects", projectId, SCENARIO_RECORDS_COLLECTION);
   const casesRef = collection(db, "projects", projectId, SCENARIO_CASES_COLLECTION);
+  const framesRef = collection(db, "projects", projectId, SCENARIO_FRAMES_COLLECTION);
   const deleted = normalizedDeletionSet(deletedItemIds);
   const operations: Array<(batch: ReturnType<typeof writeBatch>) => void> = [];
   // Scenario documents are long-lived records. Read the current version first
@@ -1494,16 +1497,33 @@ export const saveScenariosToFirestore = async (
     return '';
   };
 
-  scenarios.forEach(scenario => {
-    if (!scenario?.id || deleted.has(String(scenario.id).trim().toLowerCase())) return;
+  for (const scenario of scenarios) {
+    if (!scenario?.id || deleted.has(String(scenario.id).trim().toLowerCase())) continue;
 
     const scenarioDocId = encodeURIComponent(String(scenario.id));
-    const { testCases = [], ...scenarioData } = scenario as TestScenario & {
+    const { testCases = [], videoFrames, ...scenarioData } = scenario as TestScenario & {
       testCases?: TestCase[];
+      videoFrames?: Array<{ timestamp?: string; image?: string; isBlank?: boolean }>;
       scenarioDescription?: string;
       expectedResult?: string;
     };
     const existing = existingById.get(String(scenario.id)) || {};
+    const existingFramesByIndex = new Map<number, Record<string, any>>();
+    if (Array.isArray(videoFrames)) {
+      const existingFrameDocs = await getDocs(query(framesRef, where("scenarioId", "==", scenario.id)));
+      existingFrameDocs.docs.forEach(snapshot => {
+        const record = snapshot.data();
+        if (Number.isInteger(record.frameIndex)) {
+          existingFramesByIndex.set(record.frameIndex, { ...record, _docId: snapshot.id });
+        }
+      });
+    }
+    const existingStoredFrameCount = Math.max(
+      Number(existing.videoFrameCount) || 0,
+      Array.isArray(existing.videoFrames) ? existing.videoFrames.length : 0,
+      ...Array.from(existingFramesByIndex.keys(), frameIndex => frameIndex + 1),
+      0
+    );
     const savedMembers = Array.isArray(existing.memberScenarioIds) ? existing.memberScenarioIds : [];
     const incomingMembers = Array.isArray(scenarioData.memberScenarioIds) ? scenarioData.memberScenarioIds : [];
     const memberScenarioIds = incomingMembers.length > 0
@@ -1512,6 +1532,12 @@ export const saveScenariosToFirestore = async (
     const durableScenarioData = {
       ...existing,
       ...scenarioData,
+      // Keep frame payloads in separate documents so a walkthrough with many
+      // keyframes cannot exceed Firestore's 1 MiB per-document limit.
+      videoFrameCount: Math.max(
+        existingStoredFrameCount,
+        Array.isArray(videoFrames) ? videoFrames.length : 0
+      ),
       description: firstText(scenarioData.description, scenarioData.scenarioDescription, existing.description, existing.scenarioDescription),
       expectedResults: firstText(scenarioData.expectedResults, scenarioData.expectedResult, existing.expectedResults, existing.expectedResult),
       folderId: firstText(
@@ -1526,10 +1552,28 @@ export const saveScenariosToFirestore = async (
         ? { memberScenarioIds }
         : {})
     };
+    delete (durableScenarioData as any).videoFrames;
     operations.push(batch => batch.set(doc(recordsRef, scenarioDocId), cleanFirestoreData({
       ...durableScenarioData,
       id: scenario.id
     })));
+
+    if (Array.isArray(videoFrames)) {
+      videoFrames.forEach((frame, frameIndex) => {
+        const frameDocId = `${scenarioDocId}__frame_${String(frameIndex).padStart(3, "0")}`;
+        const previous = existingFramesByIndex.get(frameIndex);
+        if (!previous || JSON.stringify(previous.frame) !== JSON.stringify(frame)) {
+          operations.push(batch => batch.set(doc(framesRef, frameDocId), cleanFirestoreData({
+            scenarioId: scenario.id,
+            frameIndex,
+            frame
+          })));
+        }
+      });
+
+      // Do not delete stored frames merely because this client has a shorter
+      // snapshot. Frame deletion requires an explicit scenario tombstone.
+    }
 
     testCases.forEach((testCase, index) => {
       if (!testCase) return;
@@ -1542,10 +1586,11 @@ export const saveScenariosToFirestore = async (
         testCase
       })));
     });
-  });
+  }
 
   if (deleted.size > 0) {
     const existingCases = await getDocs(casesRef);
+    const existingFrames = await getDocs(framesRef);
     existingRecords.docs.forEach(snapshot => {
       const record = snapshot.data();
       const id = String(record.id || snapshot.id);
@@ -1564,6 +1609,14 @@ export const saveScenariosToFirestore = async (
         operations.push(batch => batch.delete(snapshot.ref));
       }
     });
+
+    existingFrames.docs.forEach(snapshot => {
+      const record = snapshot.data();
+      const scenarioId = String(record.scenarioId || "").trim().toLowerCase();
+      if (deleted.has(scenarioId)) {
+        operations.push(batch => batch.delete(snapshot.ref));
+      }
+    });
   }
 
   await commitScenarioOperations(operations);
@@ -1575,11 +1628,13 @@ export const saveScenariosToFirestore = async (
 export const loadScenariosFromFirestore = async (projectId: string): Promise<TestScenario[]> => {
   if (!projectId) return [];
 
-  const [recordsSnap, casesSnap] = await Promise.all([
+  const [recordsSnap, casesSnap, framesSnap] = await Promise.all([
     getDocs(query(collection(db, "projects", projectId, SCENARIO_RECORDS_COLLECTION))),
-    getDocs(query(collection(db, "projects", projectId, SCENARIO_CASES_COLLECTION)))
+    getDocs(query(collection(db, "projects", projectId, SCENARIO_CASES_COLLECTION))),
+    getDocs(query(collection(db, "projects", projectId, SCENARIO_FRAMES_COLLECTION)))
   ]);
   const casesByScenario = new Map<string, TestCase[]>();
+  const framesByScenario = new Map<string, Array<{ frameIndex: number; frame: any }>>();
 
   casesSnap.docs.forEach(snapshot => {
     const record = snapshot.data();
@@ -1589,12 +1644,30 @@ export const loadScenariosFromFirestore = async (projectId: string): Promise<Tes
     casesByScenario.set(record.scenarioId, cases);
   });
 
+  framesSnap.docs.forEach(snapshot => {
+    const record = snapshot.data();
+    if (!record.scenarioId || !record.frame || !Number.isInteger(record.frameIndex)) return;
+    const frames = framesByScenario.get(record.scenarioId) || [];
+    frames.push({ frameIndex: record.frameIndex, frame: record.frame });
+    framesByScenario.set(record.scenarioId, frames);
+  });
+
   return recordsSnap.docs.map(snapshot => {
     const record = snapshot.data();
     const scenarioId = String(record.id || snapshot.id);
+    const persistedFrames = (framesByScenario.get(scenarioId) || [])
+      .sort((a, b) => a.frameIndex - b.frameIndex)
+      .map(item => item.frame);
+    const legacyFrames = Array.isArray(record.videoFrames) ? record.videoFrames : [];
+    const loadedFrames = persistedFrames.length >= legacyFrames.length ? persistedFrames : legacyFrames;
+    const frameCount = Math.max(
+      Number.isInteger(record.videoFrameCount) ? record.videoFrameCount : 0,
+      loadedFrames.length
+    );
     return {
       ...record,
       id: scenarioId,
+      videoFrames: frameCount > 0 ? loadedFrames.slice(0, frameCount) : [],
       testCases: casesByScenario.get(scenarioId) || []
     } as TestScenario;
   });
@@ -1760,6 +1833,21 @@ export const updateProjectFirestore = async (projectId: string, data: any, optio
     }
   };
 
+  // Serialize complete-project writes per project. Immediate writes can be
+  // triggered by different pages at nearly the same time; without this queue,
+  // an older snapshot can finish last and replace a newer Firestore document.
+  const enqueueWrite = (): Promise<void> => {
+    const previous = firestoreProjectWriteQueues.get(projectId) || Promise.resolve();
+    const write = previous.catch(() => {}).then(performWrite);
+    firestoreProjectWriteQueues.set(projectId, write);
+    void write.finally(() => {
+      if (firestoreProjectWriteQueues.get(projectId) === write) {
+        firestoreProjectWriteQueues.delete(projectId);
+      }
+    }).catch(() => {});
+    return write;
+  };
+
   // If immediate requested, write directly without debounce delay
   if (options?.immediate) {
     if (firestoreUpdateTimers.has(projectId)) {
@@ -1770,7 +1858,7 @@ export const updateProjectFirestore = async (projectId: string, data: any, optio
     firestoreUpdateResolvers.delete(projectId);
 
     try {
-      await performWrite();
+      await enqueueWrite();
       resolvers.forEach(r => r.resolve());
       return;
     } catch (error) {
@@ -1795,7 +1883,7 @@ export const updateProjectFirestore = async (projectId: string, data: any, optio
       const resolvers = firestoreUpdateResolvers.get(projectId) || [];
       firestoreUpdateResolvers.delete(projectId);
       try {
-        await performWrite();
+        await enqueueWrite();
         resolvers.forEach(r => r.resolve());
       } catch (error) {
         resolvers.forEach(r => r.reject(error));

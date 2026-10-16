@@ -14,6 +14,7 @@ import { generateUniqueFolderId } from '../utils/idGenerator';
 // 1. In-Memory Project Cache (survives component remounts and async calls)
 const memoryProjectCache = new Map<string, Project>();
 const serverBackupWriteQueues = new Map<string, Promise<void>>();
+const projectBackupWriteVersions = new Map<string, number>();
 
 /** Serialize backup requests per project so delayed writes cannot replace a newer snapshot. */
 export const queueProjectBackupWrite = (project: Project | Record<string, any>): Promise<void> => {
@@ -413,6 +414,9 @@ export const saveProjectBackup = async (
 ): Promise<void> => {
   if (!project || !project.id) return;
 
+  const writeVersion = (projectBackupWriteVersions.get(project.id) || 0) + 1;
+  projectBackupWriteVersions.set(project.id, writeVersion);
+
   // Run full folder and reference synchronization before persisting
   const syncedProject = syncFolderReferences(project) as Project;
 
@@ -434,7 +438,7 @@ export const saveProjectBackup = async (
   // 2. IndexedDB write (safe for large files / 135+ files)
   try {
     const db = await openDb();
-    if (db) {
+    if (db && projectBackupWriteVersions.get(syncedProject.id) === writeVersion) {
       const tx = db.transaction(STORE_NAME, 'readwrite');
       const store = tx.objectStore(STORE_NAME);
       store.put({
@@ -449,6 +453,10 @@ export const saveProjectBackup = async (
 
   // 3. LocalStorage backup (best effort, graceful catch if quota exceeded)
   try {
+    if (projectBackupWriteVersions.get(syncedProject.id) !== writeVersion) {
+      if (options.awaitServer) await serverBackupWrite;
+      return;
+    }
     const serialized = JSON.stringify(syncedProject);
     if (serialized.length < 3500000) {
       localStorage.setItem(`automatiqa_project_backup_${syncedProject.id}`, serialized);
@@ -1147,7 +1155,18 @@ export const mergeScenariosWithBackup = (
           videoUrl: existing.videoUrl || bs.videoUrl,
           videoFileName: existing.videoFileName || bs.videoFileName,
           videoDuration: existing.videoDuration || bs.videoDuration,
-          videoFrames: (existing.videoFrames && existing.videoFrames.length > 0) ? existing.videoFrames : bs.videoFrames,
+          // Prefer the copy with more keyframes. A legacy Firestore record may
+          // contain only a partial frame list while IndexedDB/server backup
+          // still has the full walkthrough.
+          videoFrames: (existing.videoFrames?.length || 0) >= (bs.videoFrames?.length || 0)
+            ? existing.videoFrames
+            : bs.videoFrames,
+          videoFrameCount: Math.max(
+            Number(existing.videoFrameCount) || 0,
+            Number(bs.videoFrameCount) || 0,
+            existing.videoFrames?.length || 0,
+            bs.videoFrames?.length || 0
+          ),
           videoSize: existing.videoSize || bs.videoSize
         });
       }

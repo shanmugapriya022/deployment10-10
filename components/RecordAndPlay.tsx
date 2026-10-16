@@ -2811,6 +2811,8 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
   };
 
   const handleStartRecording = () => {
+    // Web recordings now use the supported browser extension flow.
+    setRecordingMode('extension');
     setIsStartModalOpen(true);
   };
 
@@ -5370,69 +5372,17 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
 
             {/* Recording Mode */}
             <div>
-              <div className="flex p-1 bg-slate-100 rounded-2xl gap-1">
-                <button 
-                  type="button"
-                  onClick={() => setRecordingMode('manual')}
-                  className={`flex-1 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 cursor-pointer ${
-                    recordingMode === 'manual' 
-                      ? 'bg-white text-indigo-600 shadow-sm' 
-                      : 'text-slate-400 hover:text-slate-600'
-                  }`}
-                >
-                  <Layers size={14} /> Functional
-                </button>
+              <div className="flex p-1 bg-slate-100 rounded-2xl">
                 <button 
                   type="button"
                   onClick={() => setRecordingMode('extension')}
-                  className={`flex-1 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 cursor-pointer ${
-                    recordingMode === 'extension' 
-                      ? 'bg-white text-indigo-600 shadow-sm' 
-                      : 'text-slate-400 hover:text-slate-600'
-                  }`}
+                  className="flex-1 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 cursor-pointer bg-white text-indigo-600 shadow-sm"
                 >
                   <ExternalLink size={14} /> Extension
                 </button>
-                <button 
-                  type="button"
-                  onClick={() => setRecordingMode('codegen')}
-                  className={`flex-1 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 cursor-pointer ${
-                    recordingMode === 'codegen' 
-                      ? 'bg-white text-indigo-600 shadow-sm' 
-                      : 'text-slate-400 hover:text-slate-600'
-                  }`}
-                >
-                  <Terminal size={14} /> Codegen
-                </button>
               </div>
-              <p className="text-[9px] text-slate-400 font-medium mt-2 ml-2">
-                {recordingMode === 'manual' 
-                  ? "Uses a secure proxy to record actions directly in this window. No extension required." 
-                  : recordingMode === 'extension'
-                  ? "Requires the QA Recorder browser extension to capture actions in a new tab."
-                  : "Launches a high-fidelity Playwright session to generate optimized scripts in real-time."}
-              </p>
+              <p className="text-[9px] text-slate-400 font-medium mt-2 ml-2">Requires the QA Recorder browser extension to capture actions in a new tab.</p>
             </div>
-
-            {recordingMode === 'codegen' && (
-              <div className="flex items-center justify-between p-4 bg-indigo-50 rounded-2xl border border-indigo-100 animate-in fade-in slide-in-from-top-2 duration-300">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 bg-indigo-600 rounded-lg text-white">
-                    <Terminal size={16} />
-                  </div>
-                  <div>
-                    <p className="text-[10px] font-black text-indigo-900 uppercase tracking-widest">Developer Console</p>
-                    <p className="text-[9px] text-indigo-600 font-medium">Capture logs and network errors in real-time</p>
-                  </div>
-                </div>
-                <button 
-                  onClick={() => setEnableDevTools(!enableDevTools)}
-                  className={`w-12 h-6 rounded-full relative transition-colors ${enableDevTools ? 'bg-indigo-600' : 'bg-slate-300'}`}
-                >
-                  <div className={`absolute top-1 w-4 h-4 bg-white rounded-full shadow-sm transition-all ${enableDevTools ? 'right-1' : 'left-1'}`} />
-                </button>
-              </div>
-            )}
 
             {/* Extension Download Option & Setup Instructions */}
             <div className="p-5 bg-slate-900 text-white rounded-2xl border border-indigo-500/30 space-y-4 animate-in fade-in slide-in-from-top-2 duration-300 shadow-xl">

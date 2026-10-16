@@ -691,7 +691,43 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
     let hasChanges = false;
     const deleted = getDeletedIds(project.id);
 
+    // Repair records affected by the old partial-move behavior. That code
+    // linked the whole source scenario to a folder even when the folder held
+    // only some of its cases, which made the remaining cases disappear from
+    // the Individual view after the next project save/reload.
+    const partiallyMovedScenarioIds = new Set<string>();
+    testCaseFolders.forEach(folder => {
+      const folderCaseKeys = new Set<string>();
+      (folder.testCases || []).forEach(testCase => {
+        if (testCase.id) folderCaseKeys.add(testCase.id);
+        if (testCase.testCaseId) folderCaseKeys.add(testCase.testCaseId.trim().toLowerCase());
+      });
+
+      (folder.memberScenarioIds || []).forEach(memberId => {
+        const source = project.scenarios.find(s => s.id === memberId || s.scenarioId === memberId);
+        if (!source || isStructuralScenario(source)) return;
+        const sourceCases = getScenarioCases(source);
+        if (sourceCases.length === 0) return;
+        const hasCaseOutsideFolder = sourceCases.some(testCase =>
+          !folderCaseKeys.has(testCase.id) &&
+          !(testCase.testCaseId && folderCaseKeys.has(testCase.testCaseId.trim().toLowerCase()))
+        );
+        if (hasCaseOutsideFolder) partiallyMovedScenarioIds.add(source.id);
+      });
+    });
+
     const cleaned = project.scenarios.map(s => {
+      if (!s.isFolder && partiallyMovedScenarioIds.has(s.id)) {
+        hasChanges = true;
+        return {
+          ...s,
+          isRemovedFromIndividual: false,
+          testCaseFolderId: undefined,
+          folderId: undefined,
+          folderName: undefined
+        };
+      }
+
       // 1. Scenarios belonging to a test case folder must be marked isRemovedFromIndividual: true
       const belongsToFolder = !s.isFolder && (
         folderScenarioIds.has(s.id) ||
@@ -719,10 +755,21 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
       return s;
     });
 
+    const cleanedScenarios = cleaned.map(s => {
+      if (!s.isFolder || !Array.isArray(s.memberScenarioIds)) return s;
+      const remainingMembers = s.memberScenarioIds.filter(memberId => {
+        const source = project.scenarios.find(item => item.id === memberId || item.scenarioId === memberId);
+        return !source || !partiallyMovedScenarioIds.has(source.id);
+      });
+      if (remainingMembers.length === s.memberScenarioIds.length) return s;
+      hasChanges = true;
+      return { ...s, memberScenarioIds: remainingMembers };
+    });
+
     if (hasChanges) {
-      onUpdateProject({ ...project, scenarios: cleaned });
+      onUpdateProject({ ...project, scenarios: cleanedScenarios });
     }
-  }, [project, onUpdateProject, isStructuralScenario, folderScenarioIds, testCaseFolders]);
+  }, [project, onUpdateProject, isStructuralScenario, folderScenarioIds, testCaseFolders, getScenarioCases]);
 
   // Approved scenarios available in AI Test Cases INDIVIDUAL view (all approved non-structural scenarios that do NOT belong to a test case folder)
   const approvedScenarios = useMemo(() => {
@@ -5765,6 +5812,18 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
                     }
                   });
 
+                  // A folder may claim a source scenario only when every case
+                  // in that scenario is moved. Linking a partially moved
+                  // scenario hides its remaining cases from the Individual tab.
+                  const fullyMovedScenarioIds = new Set<string>();
+                  movedScenarioIds.forEach(scenarioId => {
+                    const sourceScenario = project.scenarios.find(s => s.id === scenarioId);
+                    const sourceCases = sourceScenario ? getScenarioCases(sourceScenario) : [];
+                    if (sourceCases.length > 0 && sourceCases.every(testCase => selectedCaseIds.has(testCase.id))) {
+                      fullyMovedScenarioIds.add(scenarioId);
+                    }
+                  });
+
                   if (casesToMove.length === 0) {
                     toast.error('No test cases selected to move');
                     return;
@@ -5804,7 +5863,7 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
                         createdAt: new Date().toISOString(),
                         testCases: casesToMove,
                         saved: true,
-                        memberScenarioIds: Array.from(movedScenarioIds)
+                        memberScenarioIds: Array.from(fullyMovedScenarioIds)
                       };
                     }
 
@@ -5814,7 +5873,7 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
                         const existing = scen.testCases || [];
                         const existingIds = new Set(existing.map((c: any) => c.id));
                         const uniqueNew = casesToMove.filter(c => !existingIds.has(c.id));
-                        const mergedMembers = Array.from(new Set([...(scen.memberScenarioIds || []), ...Array.from(movedScenarioIds)]));
+                        const mergedMembers = Array.from(new Set([...(scen.memberScenarioIds || []), ...Array.from(fullyMovedScenarioIds)]));
                         return {
                           ...scen,
                           scenarioId: 'TESTCASE_FOLDER',
@@ -5833,10 +5892,10 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
                           testCases: allCasesMoved
                             ? (scen.testCases && scen.testCases.length > 0 ? scen.testCases : casesToMove.filter(c => c.id.startsWith(`TC-${scen.id}`) || c.scenarioId === scen.id || movedScenarioIds.size === 1))
                             : remainingCases,
-                          isRemovedFromIndividual: allCasesMoved ? true : scen.isRemovedFromIndividual,
-                          testCaseFolderId: targetFolderId,
-                          folderId: targetFolderId,
-                          folderName: trimmedName,
+                          isRemovedFromIndividual: allCasesMoved,
+                          testCaseFolderId: allCasesMoved ? targetFolderId : undefined,
+                          folderId: allCasesMoved ? targetFolderId : undefined,
+                          folderName: allCasesMoved ? trimmedName : undefined,
                           saved: true
                         };
                       }
@@ -5882,9 +5941,9 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
                         testCases: allCasesMoved
                           ? (scen.testCases && scen.testCases.length > 0 ? scen.testCases : casesToMove.filter(c => c.id.startsWith(`TC-${scen.id}`) || c.scenarioId === scen.id || movedScenarioIds.size === 1))
                           : remainingCases,
-                        isRemovedFromIndividual: allCasesMoved ? true : scen.isRemovedFromIndividual,
-                        testCaseFolderId: moveTargetScenarioId,
-                        folderId: moveTargetScenarioId,
+                        isRemovedFromIndividual: allCasesMoved,
+                        testCaseFolderId: allCasesMoved ? moveTargetScenarioId : undefined,
+                        folderId: allCasesMoved ? moveTargetScenarioId : undefined,
                         saved: true
                       };
                     }
@@ -5892,7 +5951,7 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
                       const existing = scen.testCases || [];
                       const existingIds = new Set(existing.map((c: any) => c.id));
                       const uniqueNew = casesToMove.filter(c => !existingIds.has(c.id));
-                      const mergedMembers = Array.from(new Set([...(scen.memberScenarioIds || []), ...Array.from(movedScenarioIds)]));
+                      const mergedMembers = Array.from(new Set([...(scen.memberScenarioIds || []), ...Array.from(fullyMovedScenarioIds)]));
                       return {
                         ...scen,
                         isFolder: true,

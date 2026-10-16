@@ -405,8 +405,8 @@ export const FolderVideoPlayer: React.FC<FolderVideoPlayerProps> = ({
                 )}
               </div>
 
-              {/* Scrollable Frame Thumbnails Strip */}
-              <div className="flex items-center gap-2 overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-slate-900">
+              {/* Responsive grid keeps the complete extracted frame set visible. */}
+              <div className="grid grid-cols-4 sm:grid-cols-6 lg:grid-cols-8 gap-2 pb-2">
                 {videoFrames.map((frame, idx) => {
                   const ts = frame.timestamp || (frame.timeSeconds !== undefined ? formatTime(frame.timeSeconds) : `Frame ${idx + 1}`);
                   return (
@@ -414,7 +414,7 @@ export const FolderVideoPlayer: React.FC<FolderVideoPlayerProps> = ({
                       key={idx}
                       type="button"
                       onClick={() => seekToTimestamp(frame.timeSeconds !== undefined ? frame.timeSeconds : frame.timestamp)}
-                      className="group relative flex-shrink-0 w-24 h-15 rounded-lg overflow-hidden border border-slate-800 hover:border-teal-400 transition-all bg-slate-950 focus:outline-none focus:ring-1 focus:ring-teal-400 cursor-pointer"
+                      className="group relative w-full aspect-video rounded-lg overflow-hidden border border-slate-800 hover:border-teal-400 transition-all bg-slate-950 focus:outline-none focus:ring-1 focus:ring-teal-400 cursor-pointer"
                       title={`Jump to ${ts}`}
                     >
                       {frame.image ? (
@@ -497,9 +497,9 @@ export const FolderVideoPlayer: React.FC<FolderVideoPlayerProps> = ({
 
             {/* Frame strip inside modal */}
             {videoFrames.length > 0 && (
-              <div className="px-5 py-3 bg-slate-950 border-t border-slate-800 flex items-center gap-2 overflow-x-auto">
-                <span className="text-[10px] font-black uppercase text-slate-400 shrink-0 mr-1">
-                  Keyframes:
+              <div className="px-5 py-3 bg-slate-950 border-t border-slate-800 grid grid-cols-4 sm:grid-cols-6 lg:grid-cols-8 gap-2 max-h-36 overflow-y-auto">
+                <span className="col-span-full text-[10px] font-black uppercase text-slate-400">
+                  Keyframes ({videoFrames.length}):
                 </span>
                 {videoFrames.map((frame, idx) => {
                   const ts = frame.timestamp || (frame.timeSeconds !== undefined ? formatTime(frame.timeSeconds) : `F${idx + 1}`);
@@ -514,7 +514,7 @@ export const FolderVideoPlayer: React.FC<FolderVideoPlayerProps> = ({
                           theaterVideoRef.current.play().catch(() => {});
                         }
                       }}
-                      className="group relative flex-shrink-0 w-20 h-13 rounded-lg overflow-hidden border border-slate-800 hover:border-teal-400 cursor-pointer"
+                      className="group relative w-full aspect-video rounded-lg overflow-hidden border border-slate-800 hover:border-teal-400 cursor-pointer"
                     >
                       {frame.image && <img src={frame.image} alt="" className="w-full h-full object-cover" />}
                       <span className="absolute bottom-0.5 right-0.5 px-1 bg-black/80 text-[8px] font-mono text-teal-300 rounded">

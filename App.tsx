@@ -1645,7 +1645,7 @@ const App: React.FC = () => {
     // snapshot; writing it wholesale used to erase folders and saved records
     // created elsewhere in the app.
     const previousBackup = getProjectBackupSync(updatedProject.id);
-    const currentProject = projects.find(project => project.id === updatedProject.id);
+    const currentProject = projectsRef.current.find(project => project.id === updatedProject.id);
     const withCurrentData = mergeProjectWithBackupData(
       updatedProject,
       currentProject,
@@ -1659,6 +1659,13 @@ const App: React.FC = () => {
     
     // Ensure all permanently deleted items are stripped
     const cleanUpdatedProject = cleanProjectDeletedItems(withDurableData);
+
+    // Keep the synchronous project reference ahead of React's next render. A
+    // second page save in the same tick must merge with this just-saved state,
+    // rather than the older render snapshot and overwrite its repositories.
+    projectsRef.current = projectsRef.current.map(project =>
+      project.id === cleanUpdatedProject.id ? cleanUpdatedProject : project
+    );
 
     // Save multi-tier backup (in-memory, IndexedDB, localStorage, and server backup)
     saveProjectBackup(cleanUpdatedProject);
@@ -2138,13 +2145,26 @@ const App: React.FC = () => {
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0 || !addEvidenceContext) return;
+
+    const imageExtensions = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.svg']);
+    const imageFiles = Array.from(files).filter((file: File) => {
+      const extension = file.name.slice(file.name.lastIndexOf('.')).toLowerCase();
+      return !file.type.startsWith('video/') && (file.type.startsWith('image/') || imageExtensions.has(extension));
+    });
+    const rejectedCount = files.length - imageFiles.length;
+    e.target.value = '';
+
+    if (rejectedCount > 0) {
+      alert('API execution evidence accepts screenshots and image files only. Video files were not added.');
+    }
+    if (imageFiles.length === 0) return;
     
     const targetId = addEvidenceContext.scenarioId || addEvidenceContext.suite.id;
     const currentAttachments = stagedEvidence[targetId]?.attachments || [];
 
     setIsUploadingMedia(true);
     setUploadSuccessMessage(null);
-    const readers = Array.from(files).map((file: File) => {
+    const readers = imageFiles.map((file: File) => {
       return new Promise<string>((resolve) => {
         const reader = new FileReader();
         reader.onloadend = async () => {
@@ -3269,13 +3289,13 @@ const App: React.FC = () => {
                  {/* Attachments Section */}
                  <div>
                     <label className="text-[11px] font-black text-slate-400 uppercase tracking-[0.2em] mb-4 flex items-center gap-3 ml-2">
-                       <Upload size={16} className="text-indigo-50" /> EVIDENCE (SCREENSHOT/IMAGES)
+                       <Upload size={16} className="text-indigo-50" /> EVIDENCE (SCREENSHOTS ONLY)
                     </label>
                     <div 
                       onClick={() => !isUploadingMedia && fileInputRef.current?.click()}
                       className={`border-4 border-dashed border-slate-100 rounded-[3rem] p-16 flex flex-col items-center justify-center gap-6 bg-slate-50/50 hover:bg-indigo-50/20 hover:border-indigo-200 transition-all cursor-pointer group mb-10 ${isUploadingMedia ? 'opacity-50 cursor-not-allowed' : ''}`}
                     >
-                       <input type="file" multiple ref={fileInputRef} className="hidden" accept="image/*,video/*" onChange={handleFileSelect} />
+                       <input type="file" multiple ref={fileInputRef} className="hidden" accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.svg" onChange={handleFileSelect} />
                        {isUploadingMedia ? (
                           <div className="flex flex-col items-center gap-4">
                              <Loader2 size={48} className="animate-spin text-indigo-600" />
@@ -3288,7 +3308,7 @@ const App: React.FC = () => {
                              </div>
                              <div className="text-center">
                                 <p className="text-lg font-black text-slate-700 uppercase tracking-tight">Drop files or click to initiate upload</p>
-                                <p className="text-xs text-slate-400 font-bold uppercase mt-2 tracking-[0.2em]">Supports PNG, JPG, WEBP, MP4, MOV, WEBM (Aggressive Compression)</p>
+                                <p className="text-xs text-slate-400 font-bold uppercase mt-2 tracking-[0.2em]">Screenshots only: PNG, JPG, WEBP, GIF, BMP, SVG</p>
                              </div>
                           </>
                        )}
