@@ -615,8 +615,7 @@ async function classifyUrl(rawUrl: string): Promise<'direct' | 'proxy'> {
   }
 }
 
-const PORT = process.env.APP_PORT ? parseInt(process.env.APP_PORT, 10) : 3000;
-
+const PORT = Number(process.env.PORT || process.env.APP_PORT || 3000);
 /**
  * Opens a URL in the provided Playwright page using the classified mode.
  * Gives maximum reasonable opportunity to launch and become recordable.
