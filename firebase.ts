@@ -14,11 +14,39 @@ const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 const firestoreDatabaseId = (firebaseConfig as any).firestoreDatabaseId?.trim();
 const mainDb = firestoreDatabaseId ? getFirestore(app, firestoreDatabaseId) : getFirestore(app);
 
+// Resolve optional secondary AutomatiQA Backup Firebase configuration
+let backupConfig: any = null;
+try {
+  if (typeof window !== 'undefined') {
+    const customBackup = localStorage.getItem('automatiqa_backup_firebase_config');
+    if (customBackup) backupConfig = JSON.parse(customBackup);
+  }
+} catch (e) {}
+
+if (!backupConfig) {
+  try {
+    const envBackup = (import.meta as any).env?.VITE_BACKUP_FIREBASE_CONFIG;
+    if (envBackup) backupConfig = typeof envBackup === 'string' ? JSON.parse(envBackup) : envBackup;
+  } catch (e) {}
+}
+
+let backupApp: any = null;
+if (backupConfig && backupConfig.apiKey && backupConfig.projectId) {
+  try {
+    const existing = getApps().find(a => a.name === "backup-app");
+    backupApp = existing || initializeApp(backupConfig, "backup-app");
+  } catch (e) {
+    console.warn("[Firebase] Could not initialize backup Firebase app:", e);
+  }
+}
+
 export let db = mainDb;
-export let backupDb = mainDb;
+export let backupDb = backupApp 
+  ? (backupConfig.firestoreDatabaseId ? getFirestore(backupApp, backupConfig.firestoreDatabaseId) : getFirestore(backupApp))
+  : mainDb;
 
 export const auth = getAuth(app);
-export const backupAuth = auth;
+export const backupAuth = backupApp ? getAuth(backupApp) : auth;
 export const storage = getStorage(app);
 export let useBackup = false;
 

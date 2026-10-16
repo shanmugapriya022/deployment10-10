@@ -4,7 +4,8 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --host 0.0.0.0 --port 3000",
+    "dev": "tsx server.ts",
+    "dev:vite": "vite --host 0.0.0.0 --port 3000",
     "dev:fullstack": "tsx server.ts",
     "agent": "node public/automatiqa-agent.js",
     "start": "node dist/server.cjs",

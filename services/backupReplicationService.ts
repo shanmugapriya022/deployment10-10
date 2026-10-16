@@ -16,14 +16,26 @@ function getAdminInstances() {
   const mainKeyPath = path.join(process.cwd(), "main-key.json");
   const backupKeyPath = path.join(process.cwd(), "backup-key.json");
 
-  if (!fs.existsSync(mainKeyPath) || !fs.existsSync(backupKeyPath)) {
+  let mainKey: any = null;
+  let backupKey: any = null;
+
+  try {
+    if (fs.existsSync(mainKeyPath) && fs.existsSync(backupKeyPath)) {
+      mainKey = JSON.parse(fs.readFileSync(mainKeyPath, "utf8"));
+      backupKey = JSON.parse(fs.readFileSync(backupKeyPath, "utf8"));
+    } else if (process.env.MAIN_SERVICE_ACCOUNT_KEY && process.env.BACKUP_SERVICE_ACCOUNT_KEY) {
+      mainKey = typeof process.env.MAIN_SERVICE_ACCOUNT_KEY === 'string' ? JSON.parse(process.env.MAIN_SERVICE_ACCOUNT_KEY) : process.env.MAIN_SERVICE_ACCOUNT_KEY;
+      backupKey = typeof process.env.BACKUP_SERVICE_ACCOUNT_KEY === 'string' ? JSON.parse(process.env.BACKUP_SERVICE_ACCOUNT_KEY) : process.env.BACKUP_SERVICE_ACCOUNT_KEY;
+    }
+  } catch (err) {
+    console.warn("[BackupReplication] Error parsing service account credentials:", err);
+  }
+
+  if (!mainKey || !backupKey) {
     return null;
   }
 
   try {
-    const mainKey = JSON.parse(fs.readFileSync(mainKeyPath, "utf8"));
-    const backupKey = JSON.parse(fs.readFileSync(backupKeyPath, "utf8"));
-
     const existingApps = getApps();
     let mainApp = existingApps.find(a => a.name === "server-main-sync");
     if (!mainApp) {
