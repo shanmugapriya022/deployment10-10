@@ -95,7 +95,7 @@ import { Sliders, Github, Sparkles, UserPlus, Slack, Gauge } from 'lucide-react'
 import { Project, ApiTestSuite, User, UserRole, AppNotification, ApiRequest, ApiTestSuiteEvidence, TestStatus, TestCase, TestPriority, TestType, TestIntent, isApiTestingScenario } from './types';
 import { logActivity } from './services/activityService';
 import { markAsRead } from './services/notificationService';
-import { cleanFirestoreData, updateProjectFirestore, estimateSize, getDeletedIds, cleanProjectDeletedItems, filterUserAccessibleProjects, loadScenariosFromFirestore } from './services/projectService';
+import { cleanFirestoreData, updateProjectFirestore, getDeletedIds, cleanProjectDeletedItems, filterUserAccessibleProjects, loadScenariosFromFirestore } from './services/projectService';
 import { getSubscriptionRequests, subscribeToSubscriptionRequests } from './services/subscriptionService';
 import { getProjectPlans, subscribeToProjectPlans, getFirestoreTokenLogs, subscribeToFirestoreTokenLogs } from './services/tokenConsumptionService';
 import { saveProjectBackup, mergeAutomationScriptsWithBackup, mergeUploadVideoFlowsWithBackup, mergeRecordedFlowsWithBackup, mergeFoldersWithBackup, mergeProjectWithBackupData, filterDeletedScriptFiles, mergePerformanceScriptsWithBackup, mergeUserStoriesWithBackup, mergeScenariosWithBackup, syncFolderReferences, mergeUITestingFoldersWithBackup, mergeUITestingReportsWithBackup, mergeFigmaDesignReviewsWithBackup, mergeUIComparisonReportsWithBackup, mergeUITestingInputsWithBackup, getProjectBackupSync } from './services/storageBackupService';
@@ -2197,14 +2197,6 @@ const App: React.FC = () => {
     const targetId = scenarioId || suite.id;
     
     const evidenceData = stagedEvidence[targetId] || { comment: '', links: [], attachments: [] };
-
-    const currentProjectSize = estimateSize(activeProject);
-    const evidenceSize = estimateSize(evidenceData);
-    
-    if (currentProjectSize + evidenceSize > 980000) {
-      alert("This project document is almost full. Please remove old reports or large images before adding more.");
-      return;
-    }
 
     const updatedSuites = (activeProject.apiTestSuites || []).map(s => {
       if (s.id !== suite.id) return s;

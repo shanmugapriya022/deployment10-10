@@ -177,8 +177,8 @@ export const FEATURE_CREDIT_RULES: Record<string, FeatureCreditRule> = {
   automation_script_generation: {
     featureKey: 'automation_script_generation',
     displayName: 'Automation - POM script generation',
-    trial: { analysis: 100, export: 50 },
-    paid: { analysis: 100, export: 50 },
+    trial: { analysis: 50, export: 50 },
+    paid: { analysis: 50, export: 50 },
     description: 'Generate a complete Page Object Model (POM) suite from selected test cases.'
   },
   record_play_web: {

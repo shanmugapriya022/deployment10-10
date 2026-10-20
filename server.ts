@@ -10538,8 +10538,8 @@ function calculateCreditsConsumedServer(
   const f = (featureName || '').toLowerCase().trim();
 
   // A Script Generator click can issue several AI requests for batching and
-  // coverage repair, but the user is charged once for the completed POM suite.
-  if (f === 'automation_script_generation') return actionType === 'export' ? 50 : 100;
+  // coverage repair, but the user is charged 50 credits once for the completed POM suite.
+  if (f === 'automation_script_generation') return 50;
 
   // 1. AI User Stories Generation: Trial (5 / 20), Paid (5 / 10)
   if (f.includes('user_stories') || f.includes('user_story') || f.includes('user stor') || f.includes('story') || f.includes('stories')) {
@@ -11414,27 +11414,15 @@ function getProjectCurrentCycleLogsServer(plan: ProjectPlanRecord): any[] {
     return logTs >= plan.cycleStartTimestamp;
   });
 
-  // Keep server credit accounting consistent with the browser's canonical
-  // deduplicateTokenLogs(): some generation flows write the same event more
-  // than once within a few seconds. Counting those copies can show 0 credits
-  // server-side while the project UI correctly shows a positive balance.
+  // Only duplicate transaction IDs represent replicated copies of one event.
+  // Heuristically collapsing same-feature events within a time window can
+  // remove real credit charges and make balances vary between requests.
   const seenIds = new Set<string>();
   const uniqueLogs: any[] = [];
   for (const log of matchingLogs) {
     if (!log?.id || seenIds.has(log.id)) continue;
-    const duplicateEvent = uniqueLogs.some(existing => {
-      const timeDiff = Math.abs((existing.timestamp || 0) - (log.timestamp || 0));
-      const sameUser = existing.user === log.user || existing.userEmail === log.userEmail;
-      const sameFeature = existing.feature === log.feature;
-      const sameStory = Boolean(existing.userStoryId && log.userStoryId && existing.userStoryId === log.userStoryId);
-      const sameItems = existing.itemsGenerated === log.itemsGenerated;
-      return timeDiff < 8000 && sameUser && (sameFeature || sameStory) &&
-        (sameItems || existing.totalTokens === log.totalTokens);
-    });
-    if (!duplicateEvent) {
-      seenIds.add(log.id);
-      uniqueLogs.push(log);
-    }
+    seenIds.add(log.id);
+    uniqueLogs.push(log);
   }
   return uniqueLogs;
 }

@@ -849,8 +849,18 @@ export async function saveReportArtifacts(
       const textPath = `ui_testing_reports/${projectPath}/${sanitizedId}_${Date.now()}.json`;
       const textRef = ref(storage, textPath);
       const textBlob = new Blob([JSON.stringify(reportTextPayload)], { type: 'application/json' });
-      const textUpload = await uploadBytes(textRef, textBlob, { contentType: 'application/json' });
-      permanentBundle.artifactTextUrl = await getDownloadURL(textUpload.ref);
+      // A blocked Storage CORS request can remain pending in the browser even
+      // after it has logged an error. Keep the folder save bounded; the full
+      // bundle is already in IndexedDB/server backup and the report can still
+      // be saved with its compact Firestore representation.
+      const textUpload = await Promise.race([
+        uploadBytes(textRef, textBlob, { contentType: 'application/json' }),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Report text upload timed out')), 6000))
+      ]);
+      permanentBundle.artifactTextUrl = await Promise.race([
+        getDownloadURL(textUpload.ref),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Report text URL lookup timed out')), 3000))
+      ]);
     } catch (textStorageErr) {
       console.warn('[ArtifactStorage] Full report text upload notice; retaining local backup:', textStorageErr);
     }

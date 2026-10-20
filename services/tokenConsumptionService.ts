@@ -1422,7 +1422,9 @@ export const getActiveProjectName = (): string => {
 };
 
 /**
- * Deduplicate token logs by ID and by near-simultaneous duplicate generation events
+ * Deduplicate replicated copies of the same credit transaction by its stable ID.
+ * Time/feature-based matching can collapse two legitimate actions by the same
+ * user and make the displayed credit balance jump when logs are refreshed.
  */
 export const deduplicateTokenLogs = (rawLogs: TokenLog[]): TokenLog[] => {
   if (!Array.isArray(rawLogs) || rawLogs.length === 0) return [];
@@ -1434,26 +1436,8 @@ export const deduplicateTokenLogs = (rawLogs: TokenLog[]): TokenLog[] => {
     if (!log || !log.id) continue;
     if (seenIds.has(log.id)) continue;
 
-    // Check if there is already a nearly identical log generated within 8 seconds for the same feature/user
-    const isDuplicateEvent = uniqueLogs.some(existing => {
-      const timeDiff = Math.abs((existing.timestamp || 0) - (log.timestamp || 0));
-      const sameUser = existing.user === log.user || existing.userEmail === log.userEmail;
-      const sameFeature = existing.feature === log.feature;
-      const sameStory = Boolean(existing.userStoryId && log.userStoryId && existing.userStoryId === log.userStoryId);
-      const sameItems = existing.itemsGenerated === log.itemsGenerated;
-
-      return (
-        timeDiff < 8000 &&
-        sameUser &&
-        (sameFeature || sameStory) &&
-        (sameItems || (existing.totalTokens === log.totalTokens))
-      );
-    });
-
-    if (!isDuplicateEvent) {
-      seenIds.add(log.id);
-      uniqueLogs.push(log);
-    }
+    seenIds.add(log.id);
+    uniqueLogs.push(log);
   }
 
   return uniqueLogs;
@@ -1580,17 +1564,9 @@ export const addTokenLog = (logData: Partial<TokenLog> & { feature: string }): T
     cached: logData.cached || false
   };
 
-  // Prevent duplicate log entry if identical or near-simultaneous log for the same feature/user exists
-  const existingIndex = currentLogs.findIndex(l => {
-    if (l.id === newLog.id) return true;
-    const timeDiff = Math.abs((l.timestamp || 0) - (newLog.timestamp || 0));
-    return (
-      timeDiff < 8000 &&
-      (l.user === newLog.user || l.userEmail === newLog.userEmail) &&
-      (l.feature === newLog.feature || l.userStoryId === newLog.userStoryId) &&
-      (l.itemsGenerated === newLog.itemsGenerated || l.totalTokens === newLog.totalTokens)
-    );
-  });
+  // A stable transaction ID is the only safe duplicate key. Two separate
+  // actions can use the same feature and occur within a few seconds.
+  const existingIndex = currentLogs.findIndex(l => l.id === newLog.id);
 
   let updatedLogs: TokenLog[];
   if (existingIndex >= 0) {
@@ -2855,7 +2831,12 @@ export const syncAndUpdateCachedPlans = (
 
       const planType: PlanType = incomingType === 'paid' ? 'Paid' : 'Trial';
       const allocatedCredits = planType === 'Paid' ? 1000 : 100;
-      const consumedCredits = Math.min(allocatedCredits, newPlan.consumedCredits ?? 0);
+      // Within the same cycle, consumption is monotonic. Stale snapshots from
+      // another tab or backend instance must not refund credits in the UI.
+      const sameCycle = incomingCycle === existingCycle;
+      const consumedCredits = Math.min(allocatedCredits, sameCycle
+        ? Math.max(p.consumedCredits || 0, newPlan.consumedCredits || 0)
+        : (newPlan.consumedCredits || 0));
       return {
         ...newPlan,
         planType,

@@ -229,17 +229,16 @@ export async function uploadScreenshotToFirebaseStorage(
   metadataCache.set(screenshotId, metadata);
   await saveArtifact(`meta_${screenshotId}`, metadata).catch(() => {});
 
-  // 5. Persist metadata to Firestore documents so ALL authorized users across sessions/devices can load it
-  try {
-    // Global ui_screenshots collection
-    await setDoc(doc(db, 'ui_screenshots', screenshotId), metadata, { merge: true });
-    
-    // Project subcollection if projectId is specified
-    if (projectId && projectId !== 'global') {
-      await setDoc(doc(db, 'projects', projectId, 'ui_screenshots', screenshotId), metadata, { merge: true });
-    }
-  } catch (firestoreErr) {
-    console.warn('[ScreenshotStorageService] Firestore metadata write notice:', firestoreErr);
+  // 5. Persist metadata to Firestore so other sessions can find the image.
+  // These are secondary indexes: don't keep the user's report save spinner
+  // open while Firestore retries an unavailable/CORS-blocked request. The
+  // metadata is already cached locally and the report bundle has its own save.
+  void setDoc(doc(db, 'ui_screenshots', screenshotId), metadata, { merge: true })
+    .catch(firestoreErr => console.warn('[ScreenshotStorageService] Firestore metadata write notice:', firestoreErr));
+
+  if (projectId && projectId !== 'global') {
+    void setDoc(doc(db, 'projects', projectId, 'ui_screenshots', screenshotId), metadata, { merge: true })
+      .catch(firestoreErr => console.warn('[ScreenshotStorageService] Project screenshot metadata write notice:', firestoreErr));
   }
 
   return metadata;

@@ -918,18 +918,27 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
               if (s && s.id && !deletedIds.has(s.id) && !deletedIds.has(s.id.toLowerCase())) {
                 if (!scriptMap.has(s.id)) {
                   scriptMap.set(s.id, s);
-                } else {
-                  const existing = scriptMap.get(s.id)!;
-                  const isExistingTruncated = !existing.jmxContent || 
-                    existing.jmxContent.includes('content preserved') || 
-                    (s.jmxContent && s.jmxContent.length > (existing.jmxContent?.length || 0));
-                  if (isExistingTruncated && s.jmxContent) {
-                    scriptMap.set(s.id, { 
-                      ...existing, 
-                      jmxContent: s.jmxContent, 
-                      csvData: s.csvData || existing.csvData 
+                  } else {
+                    const existing = scriptMap.get(s.id)!;
+                    // Project state can contain a Firestore-trimmed copy while the
+                    // browser archive still has the complete report payload.
+                    // Restore every missing archive field, not only JMX content.
+                    const hasUsableValue = (value: unknown) =>
+                      value !== undefined && value !== null && value !== '' &&
+                      !(typeof value === 'string' && value.includes('[trimmed for Firestore]'));
+                    const restored = { ...existing } as PerformanceScript;
+                    (['jmxContent', 'csvData', 'analysisReport', 'trendData', 'scenarios'] as const).forEach((key) => {
+                      const currentValue = existing[key];
+                      const backupValue = s[key];
+                      const currentIsMissing = !hasUsableValue(currentValue) ||
+                        (key === 'scenarios' && Array.isArray(currentValue) && currentValue.length === 0);
+                      const backupIsBetter = key === 'jmxContent' && typeof backupValue === 'string' &&
+                        backupValue.length > (typeof currentValue === 'string' ? currentValue.length : 0);
+                      if (hasUsableValue(backupValue) && (currentIsMissing || backupIsBetter)) {
+                        (restored as any)[key] = backupValue;
+                      }
                     });
-                  }
+                    if (restored !== existing) scriptMap.set(s.id, restored);
                 }
               }
             });
@@ -949,15 +958,17 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
     });
   }, [allPerformanceScripts]);
 
-  const countJmx = useMemo(() => archives.filter(item => !item.analysisReport && Boolean(item.jmxContent || item.scenarios?.length)).length, [archives]);
-  const countReports = useMemo(() => archives.filter(item => Boolean(item.analysisReport)).length, [archives]);
-  const countGraphs = useMemo(() => archives.filter(item => Boolean(item.trendData && !item.analysisReport)).length, [archives]);
+  const isGraphArtifact = (item: PerformanceScript) => Boolean(item.trendData) || /\bgraph\s*report\b/i.test(item.name || '');
+  const isAnalysisArtifact = (item: PerformanceScript) => Boolean(item.analysisReport) || /\b(?:ai\s+)?analysis\s*report\b/i.test(item.name || '');
+  const countJmx = useMemo(() => archives.filter(item => !isAnalysisArtifact(item) && !isGraphArtifact(item) && Boolean(item.jmxContent || item.scenarios?.length)).length, [archives]);
+  const countReports = useMemo(() => archives.filter(isAnalysisArtifact).length, [archives]);
+  const countGraphs = useMemo(() => archives.filter(item => isGraphArtifact(item) && !isAnalysisArtifact(item)).length, [archives]);
 
   const filteredArchives = useMemo(() => {
     return archives.filter(item => {
-      const isGraph = Boolean(item.trendData && !item.analysisReport);
-      const isReport = Boolean(item.analysisReport);
-      const isJmx = !isReport && Boolean(item.jmxContent || item.scenarios?.length);
+      const isGraph = isGraphArtifact(item) && !isAnalysisArtifact(item);
+      const isReport = isAnalysisArtifact(item);
+      const isJmx = !isReport && !isGraph && Boolean(item.jmxContent || item.scenarios?.length);
 
       if (archiveClassificationFilter === 'JMX' && !isJmx) return false;
       if (archiveClassificationFilter === 'REPORT' && !isReport) return false;
@@ -967,7 +978,7 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
         const q = archiveSearch.toLowerCase().trim();
         const name = (item.name || '').toLowerCase();
         const date = item.createdAt ? new Date(item.createdAt).toLocaleDateString().toLowerCase() : '';
-        const tag = isGraph ? 'graph report' : isReport ? 'ai report' : 'jmx script';
+        const tag = isGraph ? 'graph report' : isReport ? 'analysis report ai report' : 'jmx script';
         return name.includes(q) || date.includes(q) || tag.includes(q);
       }
       return true;
@@ -2129,16 +2140,16 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
                       <td className="px-10 py-8">
                          <div className="flex items-center gap-5">
                             <div className={`p-4 rounded-2xl inline-flex items-center justify-center shadow-lg border ${
-                              item.trendData && !item.analysisReport 
+                              isGraphArtifact(item) && !isAnalysisArtifact(item)
                                 ? 'bg-purple-50 text-purple-600 border-purple-100' 
-                                : item.analysisReport 
+                                : isAnalysisArtifact(item)
                                 ? 'bg-amber-50 text-amber-600 border-amber-100' 
                                 : 'bg-indigo-50 text-indigo-600 border-indigo-100'
                             }`}>
-                                {item.trendData && !item.analysisReport ? <AreaChartIcon size={24} /> : item.analysisReport ? <FileSearch size={24} /> : <FileCode size={24} />}
+                                {isGraphArtifact(item) && !isAnalysisArtifact(item) ? <AreaChartIcon size={24} /> : isAnalysisArtifact(item) ? <FileSearch size={24} /> : <FileCode size={24} />}
                             </div>
                             <span className="text-[10px] font-black uppercase tracking-[0.1em]">
-                              {item.trendData && !item.analysisReport ? 'Graph Report' : item.analysisReport ? 'AI Report' : 'JMX Script'}
+                              {isGraphArtifact(item) && !isAnalysisArtifact(item) ? 'Graph Report' : isAnalysisArtifact(item) ? 'Analysis Report' : 'JMX Script'}
                             </span>
                          </div>
                       </td>
@@ -2159,15 +2170,15 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
                       </td>
                       <td className="px-10 py-8 text-right">
                         <div className="flex items-center justify-end gap-3 transition-all">
-                           {(item.analysisReport || item.trendData) && (
+                           {(isAnalysisArtifact(item) || isGraphArtifact(item)) && (
                              <button 
                                onClick={() => { 
                                  setViewingReportId(item.id); 
-                                 setModalActiveTab(item.trendData ? 'trends' : 'report'); 
-                                 if (item.trendData) setModalActiveMetric('hits');
+                                 setModalActiveTab(isGraphArtifact(item) && !isAnalysisArtifact(item) ? 'trends' : 'report');
+                                 if (isGraphArtifact(item)) setModalActiveMetric('hits');
                                }} 
                                className="p-3 bg-white border border-slate-200 text-slate-500 hover:text-indigo-600 rounded-2xl shadow-md transition-all hover:scale-105" 
-                               title={item.trendData ? "View Graph & Telemetry" : "View AI Verdict"}
+                               title={isGraphArtifact(item) ? "View Graph & Telemetry" : "View Analysis Report"}
                              >
                                <Eye size={22} />
                              </button>
@@ -2250,15 +2261,15 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
               <div className="p-10 border-b border-slate-100 flex items-center justify-between bg-slate-50/80 backdrop-blur-sm">
                  <div className="flex items-center gap-5">
                     <div className={`p-4 rounded-3xl text-white shadow-2xl ${
-                      archives.find(a => a.id === viewingReportId)?.trendData && !archives.find(a => a.id === viewingReportId)?.analysisReport
+                      archives.find(a => a.id === viewingReportId) && isGraphArtifact(archives.find(a => a.id === viewingReportId)!) && !isAnalysisArtifact(archives.find(a => a.id === viewingReportId)!)
                         ? 'bg-purple-600'
-                        : archives.find(a => a.id === viewingReportId)?.analysisReport 
+                        : archives.find(a => a.id === viewingReportId) && isAnalysisArtifact(archives.find(a => a.id === viewingReportId)!)
                         ? 'bg-amber-500' 
                         : 'bg-indigo-600'
                     }`}>
-                       {archives.find(a => a.id === viewingReportId)?.trendData && !archives.find(a => a.id === viewingReportId)?.analysisReport 
+                       {archives.find(a => a.id === viewingReportId) && isGraphArtifact(archives.find(a => a.id === viewingReportId)!) && !isAnalysisArtifact(archives.find(a => a.id === viewingReportId)!)
                          ? <AreaChartIcon size={32} /> 
-                         : archives.find(a => a.id === viewingReportId)?.analysisReport 
+                         : archives.find(a => a.id === viewingReportId) && isAnalysisArtifact(archives.find(a => a.id === viewingReportId)!)
                          ? <FileSearch size={32} /> 
                          : <FileCode size={32} />}
                     </div>
@@ -2269,10 +2280,10 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
                  </div>
                  <div className="flex gap-4">
                     <div className="flex bg-slate-100 p-1.5 rounded-2xl border border-slate-200">
-                        {archives.find(a => a.id === viewingReportId)?.trendData && (
+                        {archives.find(a => a.id === viewingReportId) && isGraphArtifact(archives.find(a => a.id === viewingReportId)!) && (
                           <button onClick={() => setModalActiveTab('trends')} className={`px-6 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${modalActiveTab === 'trends' ? 'bg-white shadow-md text-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}>Trends Graph</button>
                         )}
-                        {archives.find(a => a.id === viewingReportId)?.analysisReport && (
+                        {archives.find(a => a.id === viewingReportId) && isAnalysisArtifact(archives.find(a => a.id === viewingReportId)!) && (
                           <button onClick={() => setModalActiveTab('report')} className={`px-6 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${modalActiveTab === 'report' ? 'bg-white shadow-md text-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}>Verdict Report</button>
                         )}
                     </div>
@@ -2287,7 +2298,12 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
                       if (!artifact) return null;
 
                       if (modalActiveTab === 'trends') {
-                          const archivedTrendData: AnalyticsDataPoint[] = artifact.trendData ? JSON.parse(artifact.trendData) : [];
+                          let archivedTrendData: AnalyticsDataPoint[] = [];
+                          try {
+                            archivedTrendData = artifact.trendData
+                              ? (typeof artifact.trendData === 'string' ? JSON.parse(artifact.trendData) : artifact.trendData as any)
+                              : [];
+                          } catch { archivedTrendData = []; }
                           const maxValInArchived = archivedTrendData.length > 0 ? Math.max(...archivedTrendData.map((d: any) => d[metricConfigs[modalActiveMetric].dataKey])) : 0;
                           return (
                             <div className="max-w-6xl mx-auto">
@@ -2349,7 +2365,7 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
                       }
 
                       const reportData = artifact.analysisReport;
-                      if (!reportData) return null;
+                      if (!reportData) return <div className="max-w-4xl mx-auto p-8 bg-amber-50 text-amber-900 rounded-3xl border border-amber-200 shadow-inner">This saved report is identified, but its report data is missing from this browser and project backup.</div>;
                       try {
                           const parsed = typeof reportData === 'string' ? JSON.parse(reportData) : reportData;
                           return (

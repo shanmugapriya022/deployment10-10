@@ -1992,16 +1992,16 @@ export function generateFallbackScenarios(description: string, options: any = {}
 }
 
 /**
- * Normalizes test case object shape to guarantee all mandatory fields,
- * valid enums, non-empty steps, and exactly 3 test data set strings.
+ * Normalizes test case shape. Video evidence mode preserves missing values
+ * as empty so callers can reject incomplete cases instead of inventing data.
  */
-export function normalizeTestCaseShape(tc: any, idx: number): any {
+export function normalizeTestCaseShape(tc: any, idx: number, options: { videoEvidence?: boolean } = {}): any {
   const title = tc?.title || `Test Case ${idx + 1}`;
   let steps: string[] = [];
   if (Array.isArray(tc?.steps) && tc.steps.length > 0) {
     steps = tc.steps.map((s: any) => String(s).trim()).filter(Boolean);
   }
-  if (steps.length === 0) {
+  if (steps.length === 0 && !options.videoEvidence) {
     steps = [
       'Navigate to application and locate target interface section',
       `Perform verified actions for: ${title}`,
@@ -2014,10 +2014,12 @@ export function normalizeTestCaseShape(tc: any, idx: number): any {
     testDataSets = tc.testDataSets.slice(0, 3).map(String);
   } else if (Array.isArray(tc?.testDataSets) && tc.testDataSets.length > 0) {
     testDataSets = [...tc.testDataSets.map(String)];
-    while (testDataSets.length < 3) {
-      testDataSets.push(`Set ${testDataSets.length + 1}: Boundary verification dataset`);
+    if (!options.videoEvidence) {
+      while (testDataSets.length < 3) {
+        testDataSets.push(`Set ${testDataSets.length + 1}: Boundary verification dataset`);
+      }
     }
-  } else {
+  } else if (!options.videoEvidence) {
     testDataSets = [
       'Set 1: Valid standard input values',
       'Set 2: Boundary test inputs',
@@ -2037,7 +2039,7 @@ export function normalizeTestCaseShape(tc: any, idx: number): any {
   return {
     title,
     steps,
-    expectedResult: tc?.expectedResult || 'System executes operation successfully matching verified video expectations.',
+    expectedResult: tc?.expectedResult || (options.videoEvidence ? '' : 'System executes operation successfully matching verified video expectations.'),
     testType,
     testIntent,
     priority,
@@ -2836,82 +2838,26 @@ export function buildDynamicVideoDecomposedTestCases(
 }
 
 /**
- * Decomposes a video test case suite if the flow was lumped into a single mega-case
- * or if fewer than 10 granular test cases were generated.
- * Ensures every individual stage/action captured in the video is represented in its own dedicated test case.
+ * Validates and normalizes model-generated video cases without adding steps
+ * or test cases that are not supported by the uploaded frame sequence.
  */
 export function decomposeVideoTestCases(
   cases: any[],
-  videoFrames: any[] = [],
-  videoFileName: string = '',
-  scenario: any = {},
-  context: any = {}
+  _videoFrames: any[] = [],
+  _videoFileName: string = '',
+  _scenario: any = {},
+  _context: any = {}
 ): any[] {
   if (!Array.isArray(cases) || cases.length === 0) {
     return [];
   }
 
-  const normalized = cases.map((tc: any, i: number) => normalizeTestCaseShape(tc, i));
-  const expanded: any[] = [];
-
-  normalized.forEach((tc) => {
-    // If a test case contains many steps (> 3) or spans multiple keyframe actions, split/expand into granular test cases
-    if (Array.isArray(tc.steps) && tc.steps.length > 3 && normalized.length < 12) {
-      const chunkSize = Math.max(2, Math.ceil(tc.steps.length / 2));
-      for (let sIdx = 0; sIdx < tc.steps.length; sIdx += chunkSize) {
-        const subSteps = tc.steps.slice(sIdx, sIdx + chunkSize);
-        const stageNum = Math.floor(sIdx / chunkSize) + 1;
-        const firstStepText = subSteps[0] || tc.title;
-        const cleanTitle = firstStepText.replace(/^\[?Frame\s*\d+[^\]]*\]?:?\s*/i, '').replace(/^Step\s*\d+:?\s*/i, '').slice(0, 70);
-
-        expanded.push({
-          ...tc,
-          testCaseId: `TC-VID-${String(expanded.length + 1).padStart(2, '0')}`,
-          title: subSteps.length > 0 && cleanTitle ? `Video Flow - ${cleanTitle}` : `Video Flow Stage ${stageNum}: ${tc.title}`,
-          steps: subSteps,
-          expectedResult: `Verify expected UI outcome and transition for video workflow step: ${cleanTitle || tc.title}`,
-          testType: tc.testType || 'Functional',
-          testIntent: tc.testIntent || 'Positive',
-          priority: tc.priority || 'High'
-        });
-      }
-    } else {
-      expanded.push({
-        ...tc,
-        testCaseId: `TC-VID-${String(expanded.length + 1).padStart(2, '0')}`
-      });
-    }
-  });
-
-  // Ensure if video frames are present, every keyframe index is explicitly represented and covered
-  if (videoFrames.length > 0) {
-    videoFrames.forEach((frame: any, fIdx: number) => {
-      const frameNum = fIdx + 1;
-      const timestamp = frame.timestamp || `00:${(fIdx * 2).toString().padStart(2, '0')}`;
-      const frameCovered = expanded.some(tc =>
-        Array.isArray(tc.steps) && tc.steps.some((st: string) => st.toLowerCase().includes(`frame ${frameNum}`) || st.toLowerCase().includes(`page ${frameNum}`) || st.includes(timestamp))
-      );
-
-      if (!frameCovered) {
-        expanded.push({
-          testCaseId: `TC-VID-${String(expanded.length + 1).padStart(2, '0')}`,
-          title: `Verify Video Walkthrough Action at Frame ${frameNum} (@ ${timestamp})`,
-          steps: [
-            `[Frame ${frameNum} @ ${timestamp}] Observe UI layout, elements, and state shown in video keyframe ${frameNum}`,
-            `[Frame ${frameNum} @ ${timestamp}] Perform observed user interaction / action on screen`,
-            `[Frame ${frameNum} @ ${timestamp}] Assert UI response, navigation transition, and input validation`
-          ],
-          expectedResult: `UI responds correctly and transitions as demonstrated in video frame ${frameNum} (@ ${timestamp})`,
-          testType: 'Functional',
-          testIntent: 'Positive',
-          priority: 'High',
-          testDataSets: ['Valid Video Walkthrough State', 'Secondary Walkthrough Input', 'Boundary State Input']
-        });
-      }
-    });
-  }
-
-  return expanded.map((tc, i) => normalizeTestCaseShape(tc, i));
+  // Preserve the model's actual cases. Never invent placeholder steps, expected
+  // results, test data, or per-frame cases to fill gaps in the video analysis.
+  return cases
+    .map((tc: any, i: number) => normalizeTestCaseShape(tc, i, { videoEvidence: true }))
+    .filter((tc: any) => tc.title && tc.steps.length > 0 && tc.expectedResult)
+    .map((tc: any, i: number) => ({ ...tc, testCaseId: `TC-VID-${String(i + 1).padStart(2, '0')}` }));
 }
 
 export function generateFallbackTestCases(scenario: any, context: any = {}): any[] {
@@ -2940,9 +2886,9 @@ export function generateFallbackTestCases(scenario: any, context: any = {}): any
     (scenario?.title && /video|walkthrough|screen\s*recording/i.test(scenario.title))
   );
 
-  if (isVideoRelated) {
-    return buildVideoFlowDecomposedTestCases(videoFrames, videoFileName, scenTitle, scenDesc, context);
-  }
+  // Video cases must come from analyzing the actual uploaded frames. Returning
+  // generic placeholder cases when that analysis fails would mislead users.
+  if (isVideoRelated) return [];
 
   return [
     {
@@ -3354,7 +3300,7 @@ export const generateTestCasesFromScenario = async (scenario: any, context: any 
 
       const rawVideoFrames = context?.videoFrames || scenario?.videoFrames || context?.videoData?.frames || [];
       if (Array.isArray(rawVideoFrames) && rawVideoFrames.length > 0) {
-        const sampled = sampleFramesEvenly(rawVideoFrames, 8);
+        const sampled = sampleFramesEvenly(rawVideoFrames, 16);
         const withTimeout = async (promise: Promise<any>, ms: number = 3000) => {
           let timer: any;
           const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Timeout')), ms); });
@@ -3484,7 +3430,9 @@ export const generateTestCasesFromScenario = async (scenario: any, context: any 
   
   // Combine screenshots and video frame images (allow up to 8 sampled keyframes for optimal speed & reliability)
   const allVisualInputs = [...screenshotsToUse, ...videoFramesToUse];
-  const maxVisualInputs = videoFramesToUse?.length > 0 ? 8 : 6;
+  const maxVisualInputs = videoFramesToUse?.length > 0
+    ? Math.min(24, videoFramesToUse.length + screenshotsToUse.length)
+    : 6;
   const imageParts = extractImageParts(allVisualInputs, maxVisualInputs);
   const cleanContext = sanitizeContextForPrompt(context);
 
@@ -3548,7 +3496,9 @@ CRITICAL RULES FOR VIDEO ANALYSIS:
    - Expected results and visible UI states/validations
 3. DO NOT invent actions or UI elements that are NOT supported by the video or key frames.
 4. DO NOT use a fixed or hardcoded number of test cases. Generate the relevant number of test cases based on the extracted key frames and observed flow.
-5. Every test step MUST be explicitly tagged with its corresponding frame timestamp reference when referencing keyframe visuals: '[Frame X @ MM:SS] ...'.` : ''}
+5. Every test step MUST be explicitly tagged with its corresponding frame timestamp reference when referencing keyframe visuals: '[Frame X @ MM:SS] ...'.
+6. Never invent actions, results, input values, or test data to fill gaps. If a frame contains no visible user action or data value, do not create a test case for it.
+7. Return only cases supported by the actual frames. Do not use generic 'observe / perform / assert' steps or placeholder expected results.` : ''}
 ${screenshotsToUse?.length ? `
 ========================================
 STRICT UI SCREENSHOT ANALYSIS REQUIREMENT:
@@ -3596,9 +3546,8 @@ INTELLIGENT LOGIN LOGIC REQUIREMENTS:
 ========================================
 DATA SET REQUIREMENT:
 ========================================
-- For EACH test case, produce EXACTLY 3 sets of valid TEST DATA values used directly in the Test Steps.
-- These sets should be distinct (e.g. Set 1: Standard user, Set 2: Special character data, Set 3: Long string data).
-- Each set MUST be a single concise string containing only the actual input values.
+- ${isVideoWalkthrough ? 'For video cases, include only actual data values visibly entered or selected in the video; return an empty array when no concrete test data is visible. Never invent placeholder or boundary data.' : 'For EACH test case, produce EXACTLY 3 sets of valid TEST DATA values used directly in the Test Steps.'}
+- When test data sets are returned, each must contain only actual values visible in the video and must be a single concise string.
 
 MANDATORY QUANTITY & ACCURACY DIRECTIVES:
 1. FULL INPUT & SCENARIO COVERAGE:
@@ -9327,6 +9276,7 @@ export function generateFallbackUserStories(
   extraContext?: string,
   screenshots?: any[]
 ): any[] {
+  const MAX_STORIES = 12;
   const cleanDocName = (docName || '').replace(/\.[a-zA-Z0-9]+$/, '').replace(/[_-]+/g, ' ').trim();
   const refineGuideline = (extraContext || '').trim();
   const cleanRefinePrompt = refineGuideline
@@ -9338,7 +9288,7 @@ export function generateFallbackUserStories(
   const seenSummaries = new Set<string>();
 
   const addStory = (story: { summary: string; description: string; acceptanceCriteria: string }) => {
-    if (!story.summary || isNonFunctionalMetadataTitle(story.summary)) return;
+    if (allStories.length >= MAX_STORIES || !story.summary || isNonFunctionalMetadataTitle(story.summary)) return;
     const completed = ensureCompleteUserStory(story);
     const lower = completed.summary.toLowerCase().trim();
     if (seenSummaries.has(lower)) return;
@@ -9558,6 +9508,7 @@ export function parseAndNormalizeUserStories(
   extraContext?: string,
   screenshots?: any[]
 ): any[] {
+  const limitStories = (stories: any[]) => stories.slice(0, MAX_USER_STORIES_PER_GENERATION);
   if (!rawText) return generateFallbackUserStories(docName, docContent, extraContext, screenshots);
 
   let parsed: any = rawText;
@@ -9662,17 +9613,19 @@ export function parseAndNormalizeUserStories(
           return fsLower && !existingSummaryLower.includes(fsLower) && !fsLower.includes(existingSummaryLower);
         });
         if (extraStories.length > 0) {
-          return [...formatted, ...extraStories];
+          return limitStories([...formatted, ...extraStories]);
         }
-        return fallbackStories;
+        return limitStories(fallbackStories);
       }
     }
 
-    return formatted;
+    return limitStories(formatted);
   }
 
   return generateFallbackUserStories(docName, docContent, extraContext, screenshots);
 }
+
+export const MAX_USER_STORIES_PER_GENERATION = 12;
 
 export const generateUserStoriesFromDoc = async (
   fileBase64?: string,
@@ -9775,7 +9728,7 @@ CRITICAL MANDATES FOR USER STORY GENERATION:
    - You MUST generate User Stories ONLY for actual, actionable FUNCTIONAL REQUIREMENTS, user capabilities, feature workflows, and UI interactions described in the input BRD or screenshots.
    - DO NOT generate User Stories for document headers, title pages, administrative metadata, or non-functional sections such as 'Document Title', 'Project Name', 'Purpose', 'Business Objectives', 'Overview', 'Sales Goals', 'Business Models', 'Executive Summary', 'Table of Contents', 'Scope', or 'Target Audience'.
 2. DECOMPOSITION OF COMBINED FUNCTIONAL REQUIREMENTS:
-   - If the uploaded document or user instruction summarizes multiple functional capabilities in a single sentence (e.g. 'User registration/login, catalog, cart, checkout, payments, admin dashboard'), you MUST split EACH capability into its own separate, dedicated User Story (e.g. User Registration & Authentication Workflow, Product Catalog Search & Filtering, Shopping Cart Item Management, Order Checkout & Payment Gateway Integration).
+   - Keep genuinely distinct business capabilities clear, but group related operations and validations into a single cohesive User Story when needed to stay within the 12-story maximum.
 3. NO SINGLE-WORD OR INCOMPLETE STORIES (MANDATORY):
    - Every generated user story 'summary' MUST be a descriptive, multi-word functional title (3 to 6 words, e.g., "User Registration & Account Authentication", "Product Catalog Browsing & Filter Search", "Shopping Cart & Item Quantity Management", "Order Checkout & Payment Gateway Integration").
    - ABSOLUTELY NEVER output single-word summaries like "Login", "Cart", "Checkout", "Search", "Dashboard", "Profile", "Settings", "Report", "Filter".
@@ -9786,7 +9739,8 @@ CRITICAL MANDATES FOR USER STORY GENERATION:
    - The screenshot/BRD content MUST NEVER BE IGNORED.
    - Refine Instructions are GUIDELINES, DIRECTIVES, or QUALITY CRITERIA on HOW to formulate, focus, and detail the user stories for the features found in the uploaded BRD and screenshots.
    - NEVER generate only a single user story based solely on the refine instructions when a BRD document or screenshot(s) are provided!
-   - You MUST generate a comprehensive set of user stories (typically 5 to 12 stories) covering all functional modules, screens, and features in the BRD and screenshots, applying the refine instructions across those stories.
+   - Generate 5 to 12 user stories maximum for one request. Group related requirements into cohesive feature/workflow stories; put multiple related acceptance criteria in the same story instead of creating one story per field, rule, validation, or sentence.
+   - Do not return more than 12 stories, even for a long BRD. Prioritize distinct business capabilities and consolidate detailed requirements into acceptance criteria.
 5. SCREENSHOT RULES:
    - If screenshot(s) are uploaded, perform deep visual inspection on EACH attached screenshot.
    - Generate specific, distinct User Stories directly tailored to the unique UI components, forms, buttons, titles, navigation elements, and workflows shown in EACH respective screenshot.
