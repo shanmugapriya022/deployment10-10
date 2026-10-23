@@ -78,6 +78,7 @@ import { logActivity } from '../services/activityService';
 import { deductExportCredits } from '../services/creditService';
 import { addDeletedIds, getDeletedIds } from '../services/projectService';
 import { ragEnrichPrompt, indexSingleItem } from '../services/ragService';
+import { savePerformanceAnalysisReport } from '../services/artifactStorage';
 import { RAGStatusBadge } from './RAGStatusBadge';
 import { VectorSearchResult } from '../types';
 import { addTokenLog } from '../services/tokenConsumptionService';
@@ -127,6 +128,7 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
   const [modalActiveMetric, setModalActiveMetric] = useState<PerformanceMetricType>('hits');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [viewingReportId, setViewingReportId] = useState<string | null>(null);
+  const [restoredAnalysisReports, setRestoredAnalysisReports] = useState<Record<string, string>>({});
   const [modalActiveTab, setModalActiveTab] = useState<'report' | 'trends'>('trends');
   const [insightsTab, setInsightsTab] = useState<'trends' | 'report'>('trends');
   const [isDesignFile, setIsDesignFile] = useState(false);
@@ -541,7 +543,7 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
     setIsReportNamingModalOpen(true);
   };
 
-  const confirmSaveReport = () => {
+  const confirmSaveReport = async () => {
     if (!analysisResult && graphData.length === 0) return;
     const finalReportName = reportArtifactLabel.trim();
     if (!finalReportName) {
@@ -559,12 +561,29 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
       return;
     }
 
+    const reportId = `perf_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+    let analysisReportUrl: string | undefined;
+    if (analysisResult) {
+      try {
+        analysisReportUrl = await savePerformanceAnalysisReport(
+          project.id,
+          reportId,
+          typeof analysisResult === 'string' ? analysisResult : JSON.stringify(analysisResult)
+        );
+      } catch (err) {
+        console.error('Failed to store shared Performance API report:', err);
+        toast.error('Could not save this report to shared storage. Please retry.');
+        return;
+      }
+    }
+
     const newReport: PerformanceScript = {
-      id: `perf_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
+      id: reportId,
       name: finalReportName,
       scenarios: [], 
       jmxContent: '', 
       analysisReport: analysisResult ? JSON.stringify(analysisResult) : undefined, 
+      analysisReportUrl,
       trendData: graphData.length > 0 ? JSON.stringify(graphData) : undefined,
       createdAt: new Date().toISOString()
     };
@@ -957,6 +976,28 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
       return timeB - timeA;
     });
   }, [allPerformanceScripts]);
+
+  useEffect(() => {
+    if (!viewingReportId) return;
+    const artifact = archives.find(item => item.id === viewingReportId);
+    if (!artifact?.analysisReportUrl || artifact.analysisReport || restoredAnalysisReports[artifact.id]) return;
+
+    let cancelled = false;
+    fetch(artifact.analysisReportUrl, { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`Report storage returned HTTP ${response.status}`);
+        return response.text();
+      })
+      .then(reportText => {
+        if (cancelled || !reportText.trim()) return;
+        setRestoredAnalysisReports(current => ({ ...current, [artifact.id]: reportText }));
+      })
+      .catch(err => {
+        if (!cancelled) console.error('Failed to restore shared Performance API report:', err);
+      });
+
+    return () => { cancelled = true; };
+  }, [viewingReportId, archives, restoredAnalysisReports]);
 
   const isGraphArtifact = (item: PerformanceScript) => Boolean(item.trendData) || /\bgraph\s*report\b/i.test(item.name || '');
   const isAnalysisArtifact = (item: PerformanceScript) => Boolean(item.analysisReport) || /\b(?:ai\s+)?analysis\s*report\b/i.test(item.name || '');
@@ -2364,8 +2405,8 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
                           );
                       }
 
-                      const reportData = artifact.analysisReport;
-                      if (!reportData) return <div className="max-w-4xl mx-auto p-8 bg-amber-50 text-amber-900 rounded-3xl border border-amber-200 shadow-inner">This saved report is identified, but its report data is missing from this browser and project backup.</div>;
+                      const reportData = artifact.analysisReport || restoredAnalysisReports[artifact.id];
+                      if (!reportData) return <div className="max-w-4xl mx-auto p-8 bg-amber-50 text-amber-900 rounded-3xl border border-amber-200 shadow-inner">{artifact.analysisReportUrl ? 'Restoring the shared report data…' : 'This saved report is missing its report data. Reports saved from now on are stored for all project users.'}</div>;
                       try {
                           const parsed = typeof reportData === 'string' ? JSON.parse(reportData) : reportData;
                           return (

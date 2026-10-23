@@ -6998,6 +6998,9 @@ export const performUITesting = async (
       }
       throw new Error((res && res.error) || 'Invalid response from AI service');
     } catch (err: any) {
+      // Credit authorization failures must reach the UI. Falling back here
+      // would make an unpaid request appear to have produced a real report.
+      if (isCreditLimitError(err)) throw err;
       console.warn('[geminiService] performUITesting clientProxy failed, switching to resilient fallback UI analysis:', err?.message || err);
       return generateFallbackUIAnalysisReport({
         screenshots,
@@ -7484,6 +7487,8 @@ export const performFigmaDesignReview = async (
         return res.report.trim();
       }
     } catch (err: any) {
+      // Never generate a synthetic report after the server rejects credits.
+      if (isCreditLimitError(err)) throw err;
       console.warn('[geminiService] performFigmaDesignReview clientProxy failed or timed out, switching to resilient fallback Figma review report:', err?.message || err);
     }
     return generateFallbackFigmaReviewReport({
@@ -7983,6 +7988,8 @@ export const compareAppAndFigmaUI = async (
       }
       throw new Error('Invalid comparison response from service');
     } catch (err: any) {
+      // Never generate a synthetic report after the server rejects credits.
+      if (isCreditLimitError(err)) throw err;
       console.warn('[geminiService] compareAppAndFigmaUI clientProxy failed, switching to resilient fallback UI comparison:', err?.message || err);
       return generateFallbackUIComparisonReport({
         appScreenshots,

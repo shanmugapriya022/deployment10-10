@@ -1481,15 +1481,19 @@ const ApiTesting: React.FC<ApiTestingProps> = ({ project, user, onUpdateProject 
       name: newWsName.trim(), requests: [], collections: [],
       createdAt: new Date().toISOString(), isOpen: true
     };
-    try {
-      await Promise.resolve(onUpdateProject({ ...currentProj, apiWorkspaces: [newWs, ...(currentProj.apiWorkspaces || [])] }));
-    } catch (err) {
-      toast.error('Could not save the API workspace. Please try again.');
-      return;
-    }
-    setNewWsName(''); setIsCreateWsModalOpen(false);
+    // updateProject applies the new project state synchronously, then performs
+    // its Firestore write asynchronously. Close the dialog without waiting for
+    // that network write so the create action feels immediate.
+    setNewWsName('');
+    setIsCreateWsModalOpen(false);
     toggleExpand(newWs.id);
     logActivity(user.email, user.name, `Created API Workspace: ${newWs.name}`, currentProj.id, currentProj.name);
+    try {
+      void Promise.resolve(onUpdateProject({ ...currentProj, apiWorkspaces: [newWs, ...(currentProj.apiWorkspaces || [])] }))
+        .catch(() => toast.error('Workspace created locally, but could not sync it. Please check your connection.'));
+    } catch (err) {
+      toast.error('Could not save the API workspace. Please try again.');
+    }
   };
 
   const openActionModal = (config: ActionConfig, initialValue: string = '') => {

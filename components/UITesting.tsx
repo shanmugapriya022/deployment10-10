@@ -3746,6 +3746,64 @@ ${bodyHtml}
     // CRITICAL FIX: Strictly parse pageSectionText. Never fall back to full reportText when totalPages > 1
     const textToParse = pageSectionText || (totalPages === 1 ? reportText : '');
 
+    // Contrast tables have a different schema from visual defect tables. Parse
+    // their columns by header so we retain the element and recommendation, and
+    // annotate only failed checks (passing checks are findings, not defects).
+    const contrastTableRows = new Set<string>();
+    const parsedContrastChecks: Array<{ detail: string; severity: string; region: string; coordinates?: any }> = [];
+    const contrastLines = (textToParse || '').split('\n');
+    let contrastColumns: { element: number; foreground: number; background: number; ratio: number; requirement: number; status: number; recommendation: number } | null = null;
+    const tableCells = (line: string) => line.trim().split('|').slice(1, line.trim().endsWith('|') ? -1 : undefined).map(cell => cell.trim());
+    for (let lineIndex = 0; lineIndex < contrastLines.length; lineIndex++) {
+      const line = contrastLines[lineIndex].trim();
+      if (!line.startsWith('|')) {
+        contrastColumns = null;
+        continue;
+      }
+      const cells = tableCells(line);
+      const headers = cells.map(cell => cell.replace(/[*_`]/g, '').toLowerCase());
+      if (headers.some(header => /foreground/.test(header)) && headers.some(header => /background/.test(header)) && headers.some(header => /ratio/.test(header)) && headers.some(header => /status|pass.?fail|result/.test(header))) {
+        const findColumn = (pattern: RegExp) => headers.findIndex(header => pattern.test(header));
+        contrastColumns = {
+          element: findColumn(/element|component|affected|area|ui item/),
+          foreground: findColumn(/foreground/),
+          background: findColumn(/background/),
+          ratio: findColumn(/ratio/),
+          requirement: findColumn(/requirement|standard|threshold/),
+          status: findColumn(/status|pass.?fail|result/),
+          recommendation: findColumn(/recommend|adjust|evidence|fix/)
+        };
+        continue;
+      }
+      if (!contrastColumns || /^\|?\s*:?-{3,}/.test(line)) continue;
+
+      contrastTableRows.add(line);
+      const getCell = (index: number) => index >= 0 ? (cells[index] || '').replace(/[*_`]/g, '').trim() : '';
+      const status = getCell(contrastColumns.status);
+      if (!/\bFAIL(?:ED)?\b/i.test(status)) continue;
+
+      const element = getCell(contrastColumns.element) || 'UI element';
+      const foreground = getCell(contrastColumns.foreground);
+      const background = getCell(contrastColumns.background);
+      const ratio = getCell(contrastColumns.ratio);
+      const requirement = getCell(contrastColumns.requirement);
+      const recommendation = getCell(contrastColumns.recommendation);
+      const details = [
+        `${element}: ${foreground || 'Foreground not reported'} on ${background || 'background not reported'}`,
+        ratio ? `measured ratio ${ratio}` : '',
+        requirement ? `required ${requirement}` : '',
+        `status ${status}`,
+        recommendation ? `Recommendation: ${recommendation}` : ''
+      ].filter(Boolean).join('. ');
+      const parsedDetails = parseCoordinatesAndClean(details);
+      parsedContrastChecks.push({
+        detail: parsedDetails.cleanText,
+        severity: 'High',
+        region: assignDefectRegion(element, details, parsedContrastChecks.length),
+        coordinates: parsedDetails.coords || undefined
+      });
+    }
+
     // Check if section explicitly passed / zero issues or if page section is missing for multi-page document
     const isSectionClean = textToParse && (
       textToParse.toLowerCase().includes('page status: passed') ||
@@ -3764,7 +3822,15 @@ ${bodyHtml}
     );
 
     if (isSectionClean || (!textToParse && totalPages > 1)) {
-      return { visualDefects: [], contrastIssues: [], isClean: true };
+      const cleanSectionContrastIssues = parsedContrastChecks.map((check, idx) => ({
+        id: idx + 1,
+        label: 'FAIL AA',
+        detail: check.detail,
+        severity: check.severity,
+        region: check.region,
+        coordinates: check.coordinates
+      }));
+      return { visualDefects: [], contrastIssues: cleanSectionContrastIssues, isClean: cleanSectionContrastIssues.length === 0 };
     }
 
     let defId = 1;
@@ -3837,6 +3903,7 @@ ${bodyHtml}
 
     for (const rawLine of reportLines) {
       const line = rawLine.trim();
+      if (contrastTableRows.has(line)) continue;
       // Markdown tables commonly omit the optional trailing pipe. Accept both
       // forms; otherwise the final defect row can disappear from annotations.
       if (!line.startsWith('|') || line.includes('---')) continue;
@@ -4144,7 +4211,16 @@ ${bodyHtml}
 
     // Strictly separate color contrast defects from visual defects to prevent mingling
     // In Figma Design Review, Color Contrast is NEVER audited or extracted (strictly empty)
-    const rawContrast = tabType === 'figma' ? [] : rawAllDefects.filter(isContrastDefectItem);
+    const rawContrast = tabType === 'figma' ? [] : (parsedContrastChecks.length > 0
+      ? parsedContrastChecks.map((check, idx) => ({
+          id: idx + 1,
+          detail: check.detail,
+          severity: check.severity,
+          category: 'contrast' as const,
+          region: check.region,
+          coordinates: check.coordinates
+        }))
+      : rawAllDefects.filter(isContrastDefectItem));
     const rawVisual = rawAllDefects.filter(d => !isContrastDefectItem(d));
 
     // 1. Build visual defects (strictly layout, alignment, typography, spelling, missing, UI defects - NO contrast)
@@ -4161,7 +4237,7 @@ ${bodyHtml}
       rawContrast.forEach((d, idx) => {
         contrastIssues.push({
           id: idx + 1,
-          label: d.detail.includes('FAIL') ? 'FAIL AA' : (d.detail.includes('PASS') ? 'PASS AA' : 'WCAG CONTRAST'),
+          label: /\bFAIL(?:ED)?\b/i.test(`${d.detail} ${d.severity}`) ? 'FAIL AA' : (/\bPASS(?:ED)?\b/i.test(`${d.detail} ${d.severity}`) ? 'PASS AA' : 'WCAG CONTRAST'),
           detail: d.detail,
           severity: d.severity,
           region: d.region,
@@ -5220,14 +5296,20 @@ ${bodyHtml}
       setHydratedReports(updatedReports);
       setHydratedInputs(updatedInputs);
 
-      await Promise.resolve(onUpdateProject({
+      // updateProject commits to in-memory/local/server backup immediately and
+      // then writes to Firestore. A Firestore permission failure must not turn
+      // that completed local save into a false "Failed to save report" result.
+      void Promise.resolve(onUpdateProject({
         ...project,
         uiTestingFolders: folders,
         uiTestingReports: updatedReports,
         figmaDesignReviews: savedFigmaReviews,
         uiComparisonReports: savedComparisonReports,
         uiTestingInputs: updatedInputs
-      }));
+      })).catch((syncErr: any) => {
+        console.error('[UITesting] Report saved locally but project sync failed:', syncErr);
+        toast.warning('Report saved to this device, but project sync failed. Check your connection or access permissions.');
+      });
 
       if (targetFolderId) {
         setSelectedFolderId(targetFolderId);

@@ -22,6 +22,23 @@ interface ArtifactEntry {
 // In-memory fallback cache
 const memoryCache = new Map<string, any>();
 
+/** Store performance verdict text in shared Firebase Storage so every project
+ * member can open an archived report from a different browser or device. */
+export async function savePerformanceAnalysisReport(
+  projectId: string,
+  reportId: string,
+  report: string
+): Promise<string> {
+  if (!projectId || !reportId || !report) throw new Error('Performance report data is incomplete.');
+  const safeProjectId = projectId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const safeReportId = reportId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const reportRef = ref(storage, `performance_api_reports/${safeProjectId}/${safeReportId}.md`);
+  const uploaded = await uploadBytes(reportRef, new Blob([report], { type: 'text/markdown; charset=utf-8' }), {
+    contentType: 'text/markdown; charset=utf-8'
+  });
+  return getDownloadURL(uploaded.ref);
+}
+
 let dbPromise: Promise<IDBDatabase | null> | null = null;
 
 function getDB(): Promise<IDBDatabase | null> {

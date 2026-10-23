@@ -1035,17 +1035,23 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
       userStories: updatedStories
     };
 
+    // Apply the edit to project state immediately. Persistence helpers write
+    // local/server backups before the Firestore request; a Firestore
+    // permission rejection should not make a successfully applied edit look
+    // like it failed or keep the modal open.
+    setIsModalOpen(false);
     try {
-      await Promise.all([
+      void Promise.all([
         saveStoryToFirestore(project.id, savedStory.folderId, savedStory),
         Promise.resolve(onUpdateProject(updatedProject))
-      ]);
+      ]).catch((err) => {
+        console.error('[handleSaveStory] Cloud sync failed after local update:', err);
+        toast.warning('Story updated on this device, but cloud sync failed. Check your connection or access permissions.');
+      });
     } catch (err) {
-      console.error('[handleSaveStory] Persistence failed:', err);
-      toast.error('Could not save this user story. Please try again.');
-      return;
+      console.error('[handleSaveStory] Could not queue story persistence:', err);
+      toast.warning('Story updated on this device, but could not queue cloud sync.');
     }
-    setIsModalOpen(false);
     toast.success(editingStory ? 'User story updated successfully' : 'User story created manually');
 
     if (selectedStory?.id === savedStory.id) {

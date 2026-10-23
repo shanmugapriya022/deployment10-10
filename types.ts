@@ -242,6 +242,7 @@ export interface PerformanceScript {
   jmxContent: string;
   csvData?: string;
   analysisReport?: string;
+  analysisReportUrl?: string;
   trendData?: string; // Stores stringified graph telemetry
   createdAt: string;
   itemResults?: Record<string, TestStatus>; // Restored for granular tracking
