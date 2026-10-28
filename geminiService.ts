@@ -3756,27 +3756,35 @@ export function generateFallbackAutomationScript(
                 context?.generateBdd === true ||
                 /\b(bdd\s+framework|cucumber\s+framework|gherkin\s+syntax|cucumber\s+features?)\b/i.test(instruction);
 
-  const fallbackTestData = (targetCases && targetCases.length > 0)
-    ? targetCases.map((tc, idx) => ({
-        testCaseId: tc.testCaseId || tc.id || `TC-${idx + 1}`,
-        title: tc.title || `Test Case ${idx + 1}`,
-        description: tc.description || tc.title || `Execute test case ${idx + 1}`,
-        expectedStatus: "Success",
-        steps: Array.isArray(tc.steps) && tc.steps.length > 0 ? tc.steps : [tc.description || tc.title || 'Execute workflow step'],
-        expectedResult: tc.expectedResult || tc.expectedResults || 'Action completes successfully',
-        testData: tc.testData || (Array.isArray(tc.testDataSets) && tc.testDataSets.length > 0 ? tc.testDataSets[0] : 'Standard Input')
-      }))
-    : [
-        {
-          testCaseId: "TC-001",
-          title: "Standard Workflow Execution",
-          description: "Standard Valid Workflow Execution",
+  const uploadedTestRows = (Array.isArray(context?.uploadedTestData) && context.uploadedTestData.length > 0)
+    ? context.uploadedTestData
+    : (Array.isArray(context?.dataDrivenData?.rows) && context.dataDrivenData.rows.length > 0)
+      ? context.dataDrivenData.rows
+      : [];
+
+  const fallbackTestData = uploadedTestRows.length > 0
+    ? uploadedTestRows
+    : (targetCases && targetCases.length > 0)
+      ? targetCases.map((tc, idx) => ({
+          testCaseId: tc.testCaseId || tc.id || `TC-${idx + 1}`,
+          title: tc.title || `Test Case ${idx + 1}`,
+          description: tc.description || tc.title || `Execute test case ${idx + 1}`,
           expectedStatus: "Success",
-          steps: ["Navigate to application", "Execute workflow step", "Verify expected status"],
-          expectedResult: "Action completes successfully",
-          testData: "Standard Input"
-        }
-      ];
+          steps: Array.isArray(tc.steps) && tc.steps.length > 0 ? tc.steps : [tc.description || tc.title || 'Execute workflow step'],
+          expectedResult: tc.expectedResult || tc.expectedResults || 'Action completes successfully',
+          testData: tc.testData || (Array.isArray(tc.testDataSets) && tc.testDataSets.length > 0 ? tc.testDataSets[0] : 'Standard Input')
+        }))
+      : [
+          {
+            testCaseId: "TC-001",
+            title: "Standard Workflow Execution",
+            description: "Standard Valid Workflow Execution",
+            expectedStatus: "Success",
+            steps: ["Navigate to application", "Execute workflow step", "Verify expected status"],
+            expectedResult: "Action completes successfully",
+            testData: "Standard Input"
+          }
+        ];
 
   const fallbackTestDataJson = JSON.stringify(fallbackTestData, null, 2);
 
@@ -5041,6 +5049,22 @@ ${context?.coverageRepair === true ? 'COVERAGE REPAIR: The previous output was i
 5. MODULAR PAGE OBJECTS (POM MANDATE): Group page-related elements and actions into COMMON Page Object classes corresponding to actual application pages/modules (e.g., SwagLabsPage, LoginPage, InventoryPage, CartPage). STRICTLY FORBIDDEN: DO NOT create a separate Page Object file for individual steps or action numbers (e.g. DO NOT generate Page1Page, Page2Page, Page3Page, Page4Page, Step1Page, Step2Page). Page Object names MUST NOT duplicate the "Page" suffix (e.g., use "SwagLabsPage", NOT "SwagLabsPagePage").
 6. STRICT RELEVANCE DIRECTIVE: The generated automation scripts MUST be 100% relevant and strictly tailored to the SELECTED TEST CASES provided below. DO NOT invent unrelated user flows, login screens, or generic search forms if they are not in the selected test cases. The page object locators, method names, and test step assertions MUST directly correspond to the exact domain, feature, and steps of the selected test cases.
 `}
+${((Array.isArray(context?.uploadedTestData) && context.uploadedTestData.length > 0) || (Array.isArray(context?.dataDrivenData?.rows) && context.dataDrivenData.rows.length > 0)) ? `
+========================================
+MANDATORY UPLOADED DATA-DRIVEN TEST DATA (${(context?.uploadedTestData || context?.dataDrivenData?.rows || []).length} RECORDS FROM "${context?.dataDrivenFileName || context?.dataDrivenData?.fileName || 'testData.xlsx'}"):
+========================================
+The user has uploaded a Data-Driven Testing Excel / CSV test dataset.
+File Name: "${context?.dataDrivenFileName || context?.dataDrivenData?.fileName || 'testData.xlsx'}"
+Total Rows: ${(context?.uploadedTestData || context?.dataDrivenData?.rows || []).length}
+Columns: ${(context?.dataDrivenHeaders || context?.dataDrivenData?.headers || []).join(', ')}
+Data Records:
+${JSON.stringify((context?.uploadedTestData || context?.dataDrivenData?.rows || []).slice(0, 20), null, 2)}
+
+STRICT DATA-DRIVEN ARCHITECTURE REQUIREMENTS:
+1. Export and save this exact test data into 'data/testData.json' (or src/test/resources/testData.json for Java).
+2. DO NOT HARDCODE VALUES: All test specs, input fields, and assertions MUST read dynamically from this test dataset instead of hardcoded strings!
+3. Parameterize the selected test cases against this dataset (e.g. iterating over the dataset rows or mapping each test case to its designated data row).
+` : ''}
 
 ========================================
 SELECTED TEST CASES TO AUTOMATE (${(targetCases || []).length} TEST CASES):
@@ -10810,7 +10834,8 @@ export function generateFallbackFlowAutomationProject(
   tool: string = 'Playwright',
   language: string = 'TypeScript',
   framework?: string,
-  bddDoc?: any
+  bddDoc?: any,
+  dataDrivenData?: any
 ): { files: { path: string; content: string }[]; explanation: string } {
   const result = generateMultiFrameworkProject({
     flowName: flow?.name || 'Recorded Test Flow',
@@ -10821,7 +10846,8 @@ export function generateFallbackFlowAutomationProject(
     framework: framework,
     bddDocument: bddDoc,
     platform: flow?.platform || 'web',
-    enableDataDriven: Boolean(flow?.enableDataDriven)
+    enableDataDriven: Boolean(dataDrivenData?.rows?.length || flow?.enableDataDriven),
+    dataDrivenData: dataDrivenData || flow?.dataDrivenData
   });
 
   return {
@@ -10835,7 +10861,8 @@ export const generateFlowAutomationProject = async (
   tool: string = 'Playwright',
   language: string = 'TypeScript',
   framework?: string,
-  bddDoc?: any
+  bddDoc?: any,
+  dataDrivenData?: any
 ): Promise<{ files: { path: string; content: string }[]; explanation: string }> => {
   if (isBrowser) {
     try {
@@ -10846,7 +10873,7 @@ export const generateFlowAutomationProject = async (
           frameIndex: vf.frameIndex
         })) : undefined
       } : flow;
-      const res = await clientProxy('generateFlowAutomationProject', [sanitizedFlow, tool, language, framework, bddDoc]);
+      const res = await clientProxy('generateFlowAutomationProject', [sanitizedFlow, tool, language, framework, bddDoc, dataDrivenData]);
       if (res && Array.isArray(res.files) && res.files.length > 0) {
         const completedFiles = ensureCompleteProjectFiles(res.files, {
           tool,
@@ -10854,7 +10881,12 @@ export const generateFlowAutomationProject = async (
           framework,
           flowName: flow?.name,
           steps: flow?.steps,
-          targetUrl: flow?.targetUrl
+          targetUrl: flow?.targetUrl,
+          dataDrivenData: dataDrivenData ? {
+            fileName: dataDrivenData.fileName,
+            rows: dataDrivenData.rows,
+            headers: dataDrivenData.headers
+          } : undefined
         });
         if (completedFiles.length > 0 && validateProjectFilesLanguage(completedFiles, language)) {
           return {
@@ -10864,15 +10896,29 @@ export const generateFlowAutomationProject = async (
         }
       }
       console.warn(`clientProxy generateFlowAutomationProject returned files not conforming to ${language}, using verified multiFramework generator.`);
-      return generateFallbackFlowAutomationProject(flow, tool, language, framework, bddDoc);
+      return generateFallbackFlowAutomationProject(flow, tool, language, framework, bddDoc, dataDrivenData);
     } catch (err: any) {
       if (isCreditLimitError(err)) {
         throw err;
       }
       console.warn("clientProxy generateFlowAutomationProject error, generating resilient local POM framework:", err);
-      return generateFallbackFlowAutomationProject(flow, tool, language, framework, bddDoc);
+      return generateFallbackFlowAutomationProject(flow, tool, language, framework, bddDoc, dataDrivenData);
     }
   }
+
+  const ddtBlock = (dataDrivenData?.rows && dataDrivenData.rows.length > 0) ? `
+CRITICAL DATA-DRIVEN TESTING (DDT) MANDATORY INSTRUCTIONS:
+- An external data file has been provided by the user with ${dataDrivenData.rows.length} test records.
+- File Name: "${dataDrivenData.fileName || 'test_data.xlsx'}"
+- Data Headers / Columns: ${JSON.stringify(dataDrivenData.headers || Object.keys(dataDrivenData.rows[0] || {}))}
+- Sample Data Rows:
+${JSON.stringify(dataDrivenData.rows.slice(0, 5), null, 2)}
+- DDT MANDATORY RULES:
+  1. DO NOT HARDCODE recorded input values, usernames, passwords, search queries, or verification texts into test methods.
+  2. Dynamically parameterize tests using the dataset loaded from 'data/testData.json' (or language equivalent like DataProviders in TestNG, @pytest.mark.parametrize in pytest, TestCaseSource in NUnit).
+  3. Include 'data/testData.json' populated with all test rows in the generated files array.
+  4. Iterate through data rows or execute parameterized test executions for each row of test data.
+` : '';
 
   const prompt = `
 You are an expert automation architect. Convert the following recorded test flow into a complete, production-ready automation project.
@@ -10885,6 +10931,7 @@ CRITICAL MANDATORY LANGUAGE AND FRAMEWORK CONFIGURATION:
 - Platform: ${flow?.platform || 'Web'}
 ${flow?.description ? `Description: ${flow.description}` : ''}
 ${flow?.refineInstructions ? `Refine Instructions / Guidelines: ${flow.refineInstructions}` : ''}
+${ddtBlock}
 
 Complete Recorded Steps:
 ${JSON.stringify(flow?.steps || [], null, 2)}
@@ -10968,7 +11015,12 @@ STRICT MANDATORY RULES:
         framework,
         flowName: flow?.name,
         steps: flow?.steps,
-        targetUrl: flow?.targetUrl
+        targetUrl: flow?.targetUrl,
+        dataDrivenData: dataDrivenData ? {
+          fileName: dataDrivenData.fileName,
+          rows: dataDrivenData.rows,
+          headers: dataDrivenData.headers
+        } : undefined
       });
       if (completedFiles.length > 0 && validateProjectFilesLanguage(completedFiles, language)) {
         return {
@@ -10978,13 +11030,13 @@ STRICT MANDATORY RULES:
       }
     }
     console.warn(`AI generateFlowAutomationProject output failed language validation for ${language}, generating verified multi-framework project.`);
-    return generateFallbackFlowAutomationProject(flow, tool, language, framework, bddDoc);
+    return generateFallbackFlowAutomationProject(flow, tool, language, framework, bddDoc, dataDrivenData);
   } catch (err: any) {
     if (isCreditLimitError(err)) {
       throw err;
     }
     console.warn("Server generateFlowAutomationProject error, generating fallback POM project:", err);
-    return generateFallbackFlowAutomationProject(flow, tool, language, framework, bddDoc);
+    return generateFallbackFlowAutomationProject(flow, tool, language, framework, bddDoc, dataDrivenData);
   }
 };
 

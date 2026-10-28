@@ -75,7 +75,8 @@ import {
   FileSpreadsheet,
   FileText,
   UploadCloud,
-  FileCheck
+  FileCheck,
+  Table
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { io } from 'socket.io-client';
@@ -95,8 +96,21 @@ import {
   AutomationScriptFile,
   UploadVideoFlow,
   LaunchDiagnostic,
-  BrowserPermissionRequest
+  BrowserPermissionRequest,
+  DataDrivenTestData
 } from '../types';
+import { 
+  loadXlsxWorkbook, 
+  worksheetToRows, 
+  rowsToJson, 
+  parseCsvRows, 
+  createWorkbookFromRows, 
+  downloadXlsxWorkbook,
+  parseJsonDataset,
+  downloadJsonFile,
+  SAMPLE_DATA_DRIVEN_JSON
+} from '../utils/spreadsheetUtils';
+import { FormattedJsonViewer } from './FormattedJsonViewer';
 import { toast } from 'sonner';
 import { deductProjectCredits, deductExportCredits, canPerformAction, canPerformActionLocal } from '../services/creditService';
 import {
@@ -361,6 +375,182 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
   const [uploadedBddDoc, setUploadedBddDoc] = useState<BddDocumentParsed | null>(null);
   const [uploadedBddFileName, setUploadedBddFileName] = useState<string>('');
   const [isBddUploading, setIsBddUploading] = useState<boolean>(false);
+
+  // Data-Driven Testing (Optional Excel / CSV / JSON Test Data Upload for Record & Play)
+  const [dataDrivenData, setDataDrivenData] = useState<DataDrivenTestData | null>(null);
+  const [isDataPreviewOpen, setIsDataPreviewOpen] = useState(false);
+  const [previewViewMode, setPreviewViewMode] = useState<'json' | 'table'>('json');
+  const [isParsingExcel, setIsParsingExcel] = useState(false);
+  const excelFileInputRef = useRef<HTMLInputElement>(null);
+
+  // Automatic cleanup of uploaded test data file on unmount, page navigation, or page refresh
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      try {
+        sessionStorage.removeItem(`automatiqa_record_play_ddt_${project.id}`);
+      } catch (e) {}
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      setDataDrivenData(null);
+      setIsDataPreviewOpen(false);
+      try {
+        sessionStorage.removeItem(`automatiqa_record_play_ddt_${project.id}`);
+      } catch (e) {}
+    };
+  }, [project.id]);
+
+  const handleExcelUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const validExtensions = ['.xlsx', '.xls', '.csv', '.json'];
+    const lowerName = file.name.toLowerCase();
+    const isValid = validExtensions.some(ext => lowerName.endsWith(ext));
+    if (!isValid) {
+      toast.error('Please upload an Excel (.xlsx, .xls), CSV (.csv), or JSON (.json) file.');
+      return;
+    }
+
+    setIsParsingExcel(true);
+    try {
+      if (lowerName.endsWith('.json')) {
+        const text = await file.text();
+        const parsed = parseJsonDataset(text);
+        setDataDrivenData({
+          fileName: file.name,
+          fileSize: file.size,
+          sheetNames: parsed.sheetNames,
+          activeSheet: parsed.activeSheet,
+          headers: parsed.headers,
+          rows: parsed.rows,
+          allSheetsData: parsed.allSheetsData,
+          rawJsonText: parsed.rawJsonText || text,
+          fileType: 'json'
+        });
+        setPreviewViewMode('json');
+        toast.success(`Loaded ${parsed.rows.length} test data records from ${file.name}`);
+      } else if (lowerName.endsWith('.csv')) {
+        const text = await file.text();
+        const rawRows = parseCsvRows(text);
+        if (rawRows.length < 2) {
+          toast.error('CSV file must contain a header row and at least one data row.');
+          setIsParsingExcel(false);
+          return;
+        }
+        const headers = rawRows[0].map((h, i) => String(h || `Column_${i + 1}`).trim());
+        const rows = rowsToJson(rawRows);
+        setDataDrivenData({
+          fileName: file.name,
+          fileSize: file.size,
+          sheetNames: ['CSV Data'],
+          activeSheet: 'CSV Data',
+          headers,
+          rows,
+          allSheetsData: { 'CSV Data': { headers, rows } },
+          fileType: 'csv'
+        });
+        setPreviewViewMode('table');
+        toast.success(`Loaded ${rows.length} test data rows from ${file.name}`);
+      } else {
+        const buffer = await file.arrayBuffer();
+        const workbook = await loadXlsxWorkbook(buffer);
+        const sheetNames = workbook.worksheets.map(ws => ws.name);
+        if (sheetNames.length === 0) {
+          toast.error('The uploaded Excel workbook contains no worksheets.');
+          setIsParsingExcel(false);
+          return;
+        }
+
+        const allSheets: Record<string, { headers: string[]; rows: Record<string, any>[] }> = {};
+        sheetNames.forEach(sheetName => {
+          const ws = workbook.getWorksheet(sheetName);
+          if (ws) {
+            const rawRows = worksheetToRows(ws);
+            if (rawRows.length >= 2) {
+              const headers = rawRows[0].map((h, i) => String(h || `Column_${i + 1}`).trim());
+              const rows = rowsToJson(rawRows);
+              allSheets[sheetName] = { headers, rows };
+            } else {
+              allSheets[sheetName] = { headers: [], rows: [] };
+            }
+          }
+        });
+
+        const initialSheet = sheetNames.find(s => allSheets[s]?.rows?.length > 0) || sheetNames[0];
+        const currentData = allSheets[initialSheet] || { headers: [], rows: [] };
+
+        if (currentData.rows.length === 0) {
+          toast.warning(`Sheet "${initialSheet}" is empty or has no data rows.`);
+        } else {
+          toast.success(`Loaded ${currentData.rows.length} test data rows from sheet "${initialSheet}"`);
+        }
+
+        setDataDrivenData({
+          fileName: file.name,
+          fileSize: file.size,
+          sheetNames,
+          activeSheet: initialSheet,
+          headers: currentData.headers,
+          rows: currentData.rows,
+          allSheetsData: allSheets,
+          fileType: 'excel'
+        });
+        setPreviewViewMode('table');
+      }
+    } catch (err: any) {
+      console.error('[RecordAndPlay] Error parsing test data file:', err);
+      toast.error(err?.message || 'Failed to parse test data file. Please ensure it is a valid .xlsx, .csv, or .json file.');
+    } finally {
+      setIsParsingExcel(false);
+      if (excelFileInputRef.current) {
+        excelFileInputRef.current.value = '';
+      }
+    }
+  };
+
+  const handleSheetChange = (newSheet: string) => {
+    if (!dataDrivenData || !dataDrivenData.allSheetsData) return;
+    const sheetData = dataDrivenData.allSheetsData[newSheet] || { headers: [], rows: [] };
+    setDataDrivenData({
+      ...dataDrivenData,
+      activeSheet: newSheet,
+      headers: sheetData.headers,
+      rows: sheetData.rows
+    });
+    toast.info(`Switched to sheet "${newSheet}" (${sheetData.rows.length} rows)`);
+  };
+
+  const handleDownloadSampleExcel = async () => {
+    try {
+      const sampleRows = [
+        ['testCaseId', 'scenario', 'username', 'password', 'searchQuery', 'itemCount', 'expectedStatus', 'expectedMessage'],
+        ['TC-001', 'Standard User Login', 'standard_user', 'secret_sauce', 'Sauce Labs Backpack', 1, 'Success', 'Products page displayed'],
+        ['TC-002', 'Locked Out User', 'locked_out_user', 'secret_sauce', 'N/A', 0, 'Error', 'Sorry, this user has been locked out.'],
+        ['TC-003', 'Problem User Checkout', 'problem_user', 'secret_sauce', 'Sauce Labs Bike Light', 2, 'Success', 'Order completed successfully'],
+        ['TC-004', 'Performance Glitch User', 'performance_glitch_user', 'secret_sauce', 'Sauce Labs Bolt T-Shirt', 1, 'Success', 'Loaded and validated']
+      ];
+      const workbook = createWorkbookFromRows(sampleRows, 'TestData');
+      await downloadXlsxWorkbook(workbook, 'automatiqa_test_data_template.xlsx');
+      toast.success('Sample Data-Driven Excel template downloaded!');
+    } catch (err: any) {
+      console.error('Error generating sample Excel template:', err);
+      toast.error('Failed to generate template.');
+    }
+  };
+
+  const handleDownloadSampleJson = () => {
+    try {
+      downloadJsonFile(SAMPLE_DATA_DRIVEN_JSON, 'automatiqa_test_data_template.json');
+      toast.success('Sample Data-Driven JSON template downloaded!');
+    } catch (err: any) {
+      console.error('Error generating sample JSON template:', err);
+      toast.error('Failed to generate template.');
+    }
+  };
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationStages, setGenerationStages] = useState<{
     active: boolean;
@@ -4951,7 +5141,8 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
         selectedTool, 
         selectedLanguage, 
         selectedFramework, 
-        uploadedBddDoc || undefined
+        uploadedBddDoc || undefined,
+        dataDrivenData || undefined
       );
 
       // Advance through stages smoothly so each stage gets clear visual feedback without halting
@@ -4983,6 +5174,13 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
       };
       setGeneratedProject(formattedProjectResult);
       
+      // Automatic cleanup of uploaded Excel/CSV/JSON test data file once scripts are generated
+      setDataDrivenData(null);
+      setIsDataPreviewOpen(false);
+      try {
+        sessionStorage.removeItem(`automatiqa_record_play_ddt_${project.id}`);
+      } catch (e) {}
+
       const mainFile = formattedProjectResult.files.find(f => f.path.includes('spec') || f.path.includes('test')) || formattedProjectResult.files[0];
       if (mainFile) {
         setSelectedFilePath(mainFile.path);
@@ -5050,7 +5248,10 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
         source: 'record_play',
         platform: platform,
         appPackage: platform === 'mobile' ? (mobilePackageName || mobileApkName || 'com.example.app') : undefined,
-        appUrl: platform === 'web' ? targetUrl : undefined
+        appUrl: platform === 'web' ? targetUrl : undefined,
+        dataDrivenFileName: dataDrivenData?.fileName || undefined,
+        dataDrivenRowsCount: dataDrivenData?.rows?.length || undefined,
+        dataDrivenHeaders: dataDrivenData?.headers || undefined
       };
 
       const updatedScripts = existingIdx >= 0
@@ -6821,7 +7022,16 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
                       </div>
                     </div>
                     <h4 className="text-sm font-black text-slate-800 uppercase tracking-tight mb-1 group-hover:text-emerald-600 transition-colors">{script.title}</h4>
-                    <p className="text-[10px] text-slate-500 font-medium line-clamp-2 mb-4">{script.description || 'No description provided.'}</p>
+                    <p className="text-[10px] text-slate-500 font-medium line-clamp-2 mb-2">{script.description || 'No description provided.'}</p>
+                    {script.dataDrivenFileName && (
+                      <div className="flex items-center gap-1.5 mb-3 px-2 py-1 bg-teal-50 border border-teal-200 text-teal-800 rounded-lg text-[9px] font-semibold w-fit">
+                        <FileSpreadsheet size={11} className="text-teal-600 shrink-0" />
+                        <span className="truncate max-w-[150px] font-mono">{script.dataDrivenFileName}</span>
+                        {script.dataDrivenRowsCount && (
+                          <span className="text-teal-600 font-bold shrink-0">• {script.dataDrivenRowsCount} rows</span>
+                        )}
+                      </div>
+                    )}
                     <div className="flex items-center justify-between pt-4 border-t border-slate-200/60">
                       <div className="flex items-center gap-2 text-[9px] font-bold text-slate-400 uppercase tracking-widest">
                         <Clock size={12} /> {new Date(script.createdAt).toLocaleDateString()}
@@ -7108,103 +7318,267 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
               </p>
             </div>
 
-            {/* Upload BDD Document Section */}
+            {/* Data-Driven Testing (DDT) Test Data Upload Section (Optional) */}
             <div className="pt-2 border-t border-slate-100 space-y-3">
               <div className="flex items-center justify-between">
                 <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex items-center gap-1.5">
-                  <FileText size={12} className="text-indigo-600" />
-                  BDD Document / Feature File (Optional)
+                  <FileSpreadsheet size={13} className="text-teal-600" />
+                  Data-Driven Testing (Optional)
                 </label>
-                {uploadedBddDoc && (
-                  <span className="text-[9px] font-black px-2 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-full flex items-center gap-1">
-                    <CheckCircle2 size={10} /> Active
-                  </span>
-                )}
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleDownloadSampleExcel}
+                    className="text-[9px] font-bold text-teal-600 hover:text-teal-800 flex items-center gap-1 transition-colors cursor-pointer"
+                    title="Download Sample Excel Template (.xlsx)"
+                  >
+                    <Download size={10} />
+                    <span>Sample (.xlsx)</span>
+                  </button>
+                  <span className="text-slate-300 text-[10px]">|</span>
+                  <button
+                    type="button"
+                    onClick={handleDownloadSampleJson}
+                    className="text-[9px] font-bold text-teal-600 hover:text-teal-800 flex items-center gap-1 transition-colors cursor-pointer"
+                    title="Download Sample JSON Template (.json)"
+                  >
+                    <Download size={10} />
+                    <span>Sample (.json)</span>
+                  </button>
+                  {dataDrivenData && (
+                    <span className="text-[9px] font-black px-2 py-0.5 bg-teal-50 text-teal-700 border border-teal-200 rounded-full flex items-center gap-1">
+                      <CheckCircle2 size={10} /> {dataDrivenData.rows.length} Rows
+                    </span>
+                  )}
+                </div>
               </div>
 
-              {!uploadedBddDoc ? (
+              {!dataDrivenData ? (
                 <div className="relative">
                   <input
                     type="file"
-                    id="bdd-doc-upload-input"
-                    accept=".feature,.txt,.doc,.docx,.pdf,.gherkin,.md,.json"
-                    disabled={isBddUploading}
-                    onChange={async (e) => {
-                      const file = e.target.files?.[0];
-                      if (!file) return;
-                      setIsBddUploading(true);
-                      try {
-                        const text = await file.text();
-                        const parsed = parseBddDocument(text, file.name);
-                        setUploadedBddDoc(parsed);
-                        setUploadedBddFileName(file.name);
-
-                        // Auto-select BDD/Cucumber framework if available
-                        const available = getFrameworksForAutomation(selectedTool, selectedLanguage);
-                        const bddOption = available.find(f => f.toLowerCase().includes('cucumber') || f.toLowerCase().includes('bdd') || f.toLowerCase().includes('behave'));
-                        if (bddOption) {
-                          setSelectedFramework(bddOption);
-                        }
-
-                        toast.success(`Parsed BDD Document: "${file.name}" (${parsed.scenarios.length} scenarios)`);
-                      } catch (err: any) {
-                        toast.error(err.message || 'Failed to parse BDD document');
-                      } finally {
-                        setIsBddUploading(false);
-                      }
-                    }}
+                    id="record-play-ddt-upload-input"
+                    accept=".xlsx,.xls,.csv,.json,application/json"
+                    ref={excelFileInputRef}
+                    disabled={isParsingExcel}
+                    onChange={handleExcelUpload}
                     className="hidden"
                   />
                   <label
-                    htmlFor="bdd-doc-upload-input"
-                    className="flex flex-col items-center justify-center p-4 border-2 border-dashed border-slate-200 hover:border-indigo-400 hover:bg-indigo-50/20 rounded-2xl cursor-pointer transition-all text-center group"
+                    htmlFor="record-play-ddt-upload-input"
+                    className="flex flex-col items-center justify-center p-4 border-2 border-dashed border-slate-200 hover:border-teal-400 hover:bg-teal-50/20 rounded-2xl cursor-pointer transition-all text-center group"
                   >
-                    <UploadCloud size={20} className="text-slate-400 group-hover:text-indigo-600 transition-colors mb-1.5" />
-                    <span className="text-xs font-bold text-slate-700 group-hover:text-indigo-700">
-                      {isBddUploading ? 'Parsing BDD Document...' : 'Upload BDD Document (.feature / .docx / .txt)'}
+                    <FileSpreadsheet size={22} className="text-slate-400 group-hover:text-teal-600 transition-colors mb-1.5" />
+                    <span className="text-xs font-bold text-slate-700 group-hover:text-teal-700">
+                      {isParsingExcel ? 'Parsing Test Data...' : 'Upload Test Data (.xlsx / .xls / .csv / .json)'}
                     </span>
                     <span className="text-[10px] text-slate-400 mt-0.5">
-                      Gherkin feature files, Given-When-Then user stories, or test specifications
+                      Excel, CSV, or JSON dataset for dynamic parameterization without hardcoded values
                     </span>
                   </label>
                 </div>
               ) : (
-                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl space-y-2.5">
-                  <div className="flex items-center justify-between">
+                <div className="p-3.5 bg-teal-50/60 border border-teal-200 rounded-2xl space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2 min-w-0">
-                      <div className="p-1.5 bg-indigo-100 text-indigo-700 rounded-lg shrink-0">
-                        <FileCheck size={14} />
+                      <div className="p-1.5 bg-teal-600 text-white rounded-lg shrink-0 shadow-xs">
+                        <FileSpreadsheet size={15} />
                       </div>
                       <div className="truncate">
-                        <p className="text-xs font-black text-slate-800 truncate">{uploadedBddFileName}</p>
+                        <p className="text-xs font-black text-slate-800 truncate">{dataDrivenData.fileName}</p>
                         <p className="text-[10px] text-slate-500 font-medium">
-                          {uploadedBddDoc.featureTitle || 'BDD Feature'} • {uploadedBddDoc.scenarios.length} Scenarios • {uploadedBddDoc.scenarios.reduce((acc, s) => acc + (s.steps?.length || 0), 0)} Steps
+                          {(dataDrivenData.fileSize / 1024).toFixed(1)} KB • <span className="font-bold text-teal-700">{dataDrivenData.rows.length} records</span> • {dataDrivenData.headers.length} columns
                         </p>
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setUploadedBddDoc(null);
-                        setUploadedBddFileName('');
-                        toast.info('BDD document removed');
-                      }}
-                      className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer shrink-0"
-                      title="Remove BDD document"
-                    >
-                      <Trash2 size={13} />
-                    </button>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setIsDataPreviewOpen(prev => !prev)}
+                        className={`px-2 py-1 text-[10px] font-bold rounded-lg transition-colors cursor-pointer flex items-center gap-1 ${
+                          isDataPreviewOpen ? 'bg-teal-700 text-white' : 'bg-white text-teal-800 border border-teal-200 hover:bg-teal-100'
+                        }`}
+                        title={isDataPreviewOpen ? 'Hide dataset preview' : 'View dataset preview'}
+                      >
+                        <Table size={11} />
+                        <span>{isDataPreviewOpen ? 'Hide' : 'Preview'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => excelFileInputRef.current?.click()}
+                        className="px-2 py-1 text-[10px] font-bold bg-white text-slate-700 border border-slate-200 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+                        title="Replace dataset file"
+                      >
+                        Replace
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDataDrivenData(null);
+                          setIsDataPreviewOpen(false);
+                          toast.info('Test data removed');
+                        }}
+                        className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                        title="Remove test data"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
                   </div>
 
-                  {uploadedBddDoc.tags && uploadedBddDoc.tags.length > 0 && (
-                    <div className="flex flex-wrap gap-1 pt-1">
-                      {uploadedBddDoc.tags.map((tag, tIdx) => (
-                        <span key={tIdx} className="text-[9px] font-mono px-1.5 py-0.5 bg-indigo-50 text-indigo-700 rounded">
-                          {tag}
-                        </span>
-                      ))}
+                  {/* Worksheet switcher if multiple sheets */}
+                  {dataDrivenData.sheetNames.length > 1 && (
+                    <div className="flex items-center gap-2 pt-1 text-xs">
+                      <span className="text-slate-600 font-bold text-[10px]">Worksheet:</span>
+                      <select
+                        value={dataDrivenData.activeSheet}
+                        onChange={(e) => handleSheetChange(e.target.value)}
+                        className="px-2 py-0.5 bg-white border border-teal-300 rounded-md text-[11px] font-semibold text-slate-800 focus:outline-none focus:border-teal-500 cursor-pointer"
+                      >
+                        {dataDrivenData.sheetNames.map(s => (
+                          <option key={s} value={s}>
+                            {s} ({dataDrivenData.allSheetsData?.[s]?.rows?.length || 0} rows)
+                          </option>
+                        ))}
+                      </select>
                     </div>
                   )}
+
+                  {/* Column pills */}
+                  <div className="flex items-center gap-1 pt-1 flex-wrap">
+                    <span className="text-[9px] font-black text-slate-500 uppercase">Cols:</span>
+                    {dataDrivenData.headers.slice(0, 6).map((col, i) => (
+                      <span key={i} className="px-1.5 py-0.5 bg-white border border-teal-200 text-teal-800 rounded text-[9px] font-mono font-medium">
+                        {col}
+                      </span>
+                    ))}
+                    {dataDrivenData.headers.length > 6 && (
+                      <span className="text-[9px] text-slate-500 font-bold">
+                        +{dataDrivenData.headers.length - 6} more
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Expandable Data Preview Section */}
+                  {isDataPreviewOpen && (
+                    <div className="mt-2 pt-2 border-t border-teal-200">
+                      {dataDrivenData.fileType === 'json' || dataDrivenData.fileName.toLowerCase().endsWith('.json') ? (
+                        previewViewMode === 'json' ? (
+                          <FormattedJsonViewer
+                            jsonText={dataDrivenData.rawJsonText || JSON.stringify(dataDrivenData.rows, null, 2)}
+                            totalRecords={dataDrivenData.rows.length}
+                            fileName={dataDrivenData.fileName}
+                            viewMode={previewViewMode}
+                            onToggleViewMode={(mode) => setPreviewViewMode(mode)}
+                          />
+                        ) : (
+                          <div>
+                            <div className="flex items-center justify-between pb-1.5">
+                              <span className="text-[10px] font-bold text-teal-900 uppercase tracking-wide">
+                                Dataset Preview ({dataDrivenData.rows.length} rows)
+                              </span>
+                              <div className="flex items-center gap-2">
+                                <div className="flex items-center bg-slate-100 p-0.5 rounded-lg border border-slate-200">
+                                  <button
+                                    type="button"
+                                    onClick={() => setPreviewViewMode('json')}
+                                    className={`px-2 py-0.5 text-[9px] font-bold rounded-md transition-all cursor-pointer ${
+                                      previewViewMode === 'json'
+                                        ? 'bg-teal-700 text-white shadow-2xs'
+                                        : 'text-slate-600 hover:text-slate-900'
+                                    }`}
+                                  >
+                                    JSON View
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setPreviewViewMode('table')}
+                                    className={`px-2 py-0.5 text-[9px] font-bold rounded-md transition-all cursor-pointer ${
+                                      previewViewMode === 'table'
+                                        ? 'bg-teal-700 text-white shadow-2xs'
+                                        : 'text-slate-600 hover:text-slate-900'
+                                    }`}
+                                  >
+                                    Table View
+                                  </button>
+                                </div>
+                                <span className="text-[9px] text-slate-500">
+                                  First {Math.min(10, dataDrivenData.rows.length)} rows
+                                </span>
+                              </div>
+                            </div>
+                            <div className="overflow-x-auto rounded-xl border border-teal-200 bg-white max-h-48 scrollbar-thin">
+                              <table className="min-w-full text-[10px] text-left">
+                                <thead className="bg-slate-50 border-b border-slate-200 text-slate-700 font-black uppercase">
+                                  <tr>
+                                    <th className="px-2 py-1.5 text-center w-8 text-slate-400">#</th>
+                                    {dataDrivenData.headers.map((h, i) => (
+                                      <th key={i} className="px-2 py-1.5 font-mono whitespace-nowrap">{h}</th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100 text-slate-800">
+                                  {dataDrivenData.rows.slice(0, 10).map((row, rIdx) => (
+                                    <tr key={rIdx} className="hover:bg-slate-50">
+                                      <td className="px-2 py-1 text-center text-slate-400 font-mono">{rIdx + 1}</td>
+                                      {dataDrivenData.headers.map((h, cIdx) => (
+                                        <td key={cIdx} className="px-2 py-1 whitespace-nowrap max-w-[150px] truncate">
+                                          {String(row[h] ?? '')}
+                                        </td>
+                                      ))}
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        )
+                      ) : (
+                        <div>
+                          <div className="flex items-center justify-between pb-1.5">
+                            <span className="text-[10px] font-bold text-teal-900 uppercase tracking-wide">
+                              Dataset Preview ({dataDrivenData.rows.length} rows)
+                            </span>
+                            <span className="text-[9px] text-slate-500">
+                              First {Math.min(10, dataDrivenData.rows.length)} rows
+                            </span>
+                          </div>
+                          <div className="overflow-x-auto rounded-xl border border-teal-200 bg-white max-h-48 scrollbar-thin">
+                            <table className="min-w-full text-[10px] text-left">
+                              <thead className="bg-slate-50 border-b border-slate-200 text-slate-700 font-black uppercase">
+                                <tr>
+                                  <th className="px-2 py-1.5 text-center w-8 text-slate-400">#</th>
+                                  {dataDrivenData.headers.map((h, i) => (
+                                    <th key={i} className="px-2 py-1.5 font-mono whitespace-nowrap">{h}</th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-slate-100 text-slate-800">
+                                {dataDrivenData.rows.slice(0, 10).map((row, rIdx) => (
+                                  <tr key={rIdx} className="hover:bg-slate-50">
+                                    <td className="px-2 py-1 text-center text-slate-400 font-mono">{rIdx + 1}</td>
+                                    {dataDrivenData.headers.map((h, cIdx) => (
+                                      <td key={cIdx} className="px-2 py-1 whitespace-nowrap max-w-[150px] truncate">
+                                        {String(row[h] ?? '')}
+                                      </td>
+                                    ))}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <input
+                    ref={excelFileInputRef}
+                    type="file"
+                    accept=".xlsx,.xls,.csv,.json,application/json"
+                    className="hidden"
+                    onChange={handleExcelUpload}
+                  />
                 </div>
               )}
             </div>

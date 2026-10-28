@@ -1,6 +1,6 @@
 {
-  "name": "Deployment 08/10/2026 -2",
-  "description": "A comprehensive QA management platform that uses Gemini AI to generate test scenarios, test cases, and automation scripts from screenshots, URLs, and documents.",
+  "name": "AutomatiQA",
+  "description": "A comprehensive QA management platform that uses Gemini AI to generate test scenarios, modular test cases decomposed across video walkthrough keyframes, and automation scripts from screenshots, URLs, videos, and documents.",
   "requestFramePermissions": [
     "camera",
     "microphone",

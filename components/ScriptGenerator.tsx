@@ -93,6 +93,31 @@ import { deleteFolderFromFirestore } from '../services/folderPersistenceService'
 import { getProjectBackup, saveProjectBackup, filterDeletedScriptFiles } from '../services/storageBackupService';
 import { formatScriptLanguageAndFramework } from '../utils/automationFrameworkOptions';
 import { generateUniqueFolderId } from '../utils/idGenerator';
+import {
+  loadXlsxWorkbook,
+  worksheetToRows,
+  rowsToJson,
+  parseCsvRows,
+  createWorkbookFromRows,
+  downloadXlsxWorkbook,
+  parseJsonDataset,
+  downloadJsonFile,
+  SAMPLE_DATA_DRIVEN_JSON
+} from '../utils/spreadsheetUtils';
+
+import { FormattedJsonViewer } from './FormattedJsonViewer';
+
+export interface DataDrivenTestData {
+  fileName: string;
+  fileSize: number;
+  sheetNames: string[];
+  activeSheet: string;
+  headers: string[];
+  rows: Record<string, any>[];
+  allSheetsData?: Record<string, { headers: string[]; rows: Record<string, any>[] }>;
+  rawJsonText?: string;
+  fileType?: 'excel' | 'csv' | 'json';
+}
 
 interface ScriptGeneratorProps {
   project: Project;
@@ -552,6 +577,182 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
 
   // Instruction Field
   const [instructionText, setInstructionText] = useState('');
+
+  // Data-Driven Testing (Excel / CSV / JSON Test Data)
+  const [dataDrivenData, setDataDrivenData] = useState<DataDrivenTestData | null>(null);
+  const [isDataPreviewOpen, setIsDataPreviewOpen] = useState(false);
+  const [previewViewMode, setPreviewViewMode] = useState<'json' | 'table'>('json');
+  const [isParsingExcel, setIsParsingExcel] = useState(false);
+  const excelFileInputRef = useRef<HTMLInputElement>(null);
+
+  // Automatic cleanup of uploaded test data file on unmount, page navigation, or page refresh
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      try {
+        sessionStorage.removeItem(`automatiqa_ddt_data_${project.id}`);
+      } catch (e) {}
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      setDataDrivenData(null);
+      setIsDataPreviewOpen(false);
+      try {
+        sessionStorage.removeItem(`automatiqa_ddt_data_${project.id}`);
+      } catch (e) {}
+    };
+  }, [project.id]);
+
+  const handleExcelUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const validExtensions = ['.xlsx', '.xls', '.csv', '.json'];
+    const lowerName = file.name.toLowerCase();
+    const isValid = validExtensions.some(ext => lowerName.endsWith(ext));
+    if (!isValid) {
+      toast.error('Please upload an Excel (.xlsx, .xls), CSV (.csv), or JSON (.json) file.');
+      return;
+    }
+
+    setIsParsingExcel(true);
+    try {
+      if (lowerName.endsWith('.json')) {
+        const text = await file.text();
+        const parsed = parseJsonDataset(text);
+        setDataDrivenData({
+          fileName: file.name,
+          fileSize: file.size,
+          sheetNames: parsed.sheetNames,
+          activeSheet: parsed.activeSheet,
+          headers: parsed.headers,
+          rows: parsed.rows,
+          allSheetsData: parsed.allSheetsData,
+          rawJsonText: parsed.rawJsonText || text,
+          fileType: 'json'
+        });
+        setPreviewViewMode('json');
+        toast.success(`Loaded ${parsed.rows.length} test data records from ${file.name}`);
+      } else if (lowerName.endsWith('.csv')) {
+        const text = await file.text();
+        const rawRows = parseCsvRows(text);
+        if (rawRows.length < 2) {
+          toast.error('CSV file must contain a header row and at least one data row.');
+          setIsParsingExcel(false);
+          return;
+        }
+        const headers = rawRows[0].map((h, i) => String(h || `Column_${i + 1}`).trim());
+        const rows = rowsToJson(rawRows);
+        setDataDrivenData({
+          fileName: file.name,
+          fileSize: file.size,
+          sheetNames: ['CSV Data'],
+          activeSheet: 'CSV Data',
+          headers,
+          rows,
+          allSheetsData: { 'CSV Data': { headers, rows } },
+          fileType: 'csv'
+        });
+        setPreviewViewMode('table');
+        toast.success(`Loaded ${rows.length} test data rows from ${file.name}`);
+      } else {
+        const buffer = await file.arrayBuffer();
+        const workbook = await loadXlsxWorkbook(buffer);
+        const sheetNames = workbook.worksheets.map(ws => ws.name);
+        if (sheetNames.length === 0) {
+          toast.error('The uploaded Excel workbook contains no worksheets.');
+          setIsParsingExcel(false);
+          return;
+        }
+
+        const allSheets: Record<string, { headers: string[]; rows: Record<string, any>[] }> = {};
+        sheetNames.forEach(sheetName => {
+          const ws = workbook.getWorksheet(sheetName);
+          if (ws) {
+            const rawRows = worksheetToRows(ws);
+            if (rawRows.length >= 2) {
+              const headers = rawRows[0].map((h, i) => String(h || `Column_${i + 1}`).trim());
+              const rows = rowsToJson(rawRows);
+              allSheets[sheetName] = { headers, rows };
+            } else {
+              allSheets[sheetName] = { headers: [], rows: [] };
+            }
+          }
+        });
+
+        const initialSheet = sheetNames.find(s => allSheets[s]?.rows?.length > 0) || sheetNames[0];
+        const currentData = allSheets[initialSheet] || { headers: [], rows: [] };
+
+        if (currentData.rows.length === 0) {
+          toast.warning(`Sheet "${initialSheet}" is empty or has no data rows.`);
+        } else {
+          toast.success(`Loaded ${currentData.rows.length} test data rows from sheet "${initialSheet}"`);
+        }
+
+        setDataDrivenData({
+          fileName: file.name,
+          fileSize: file.size,
+          sheetNames,
+          activeSheet: initialSheet,
+          headers: currentData.headers,
+          rows: currentData.rows,
+          allSheetsData: allSheets,
+          fileType: 'excel'
+        });
+        setPreviewViewMode('table');
+      }
+    } catch (err: any) {
+      console.error('[ScriptGenerator] Error parsing test data file:', err);
+      toast.error(err?.message || 'Failed to parse test data file. Please ensure it is a valid .xlsx, .csv, or .json file.');
+    } finally {
+      setIsParsingExcel(false);
+      if (excelFileInputRef.current) {
+        excelFileInputRef.current.value = '';
+      }
+    }
+  };
+
+  const handleSheetChange = (newSheet: string) => {
+    if (!dataDrivenData || !dataDrivenData.allSheetsData) return;
+    const sheetData = dataDrivenData.allSheetsData[newSheet] || { headers: [], rows: [] };
+    setDataDrivenData({
+      ...dataDrivenData,
+      activeSheet: newSheet,
+      headers: sheetData.headers,
+      rows: sheetData.rows
+    });
+    toast.info(`Switched to sheet "${newSheet}" (${sheetData.rows.length} rows)`);
+  };
+
+  const handleDownloadSampleExcel = async () => {
+    try {
+      const sampleRows = [
+        ['testCaseId', 'scenario', 'username', 'password', 'searchQuery', 'itemCount', 'expectedStatus', 'expectedMessage'],
+        ['TC-001', 'Standard User Login', 'standard_user', 'secret_sauce', 'Sauce Labs Backpack', 1, 'Success', 'Products page displayed'],
+        ['TC-002', 'Locked Out User', 'locked_out_user', 'secret_sauce', 'N/A', 0, 'Error', 'Sorry, this user has been locked out.'],
+        ['TC-003', 'Problem User Checkout', 'problem_user', 'secret_sauce', 'Sauce Labs Bike Light', 2, 'Success', 'Order completed successfully'],
+        ['TC-004', 'Performance Glitch User', 'performance_glitch_user', 'secret_sauce', 'Sauce Labs Bolt T-Shirt', 1, 'Success', 'Loaded and validated']
+      ];
+      const workbook = createWorkbookFromRows(sampleRows, 'TestData');
+      await downloadXlsxWorkbook(workbook, 'automatiqa_test_data_template.xlsx');
+      toast.success('Sample Data-Driven Excel template downloaded!');
+    } catch (err: any) {
+      console.error('Error generating sample Excel template:', err);
+      toast.error('Failed to generate template.');
+    }
+  };
+
+  const handleDownloadSampleJson = () => {
+    try {
+      downloadJsonFile(SAMPLE_DATA_DRIVEN_JSON, 'automatiqa_test_data_template.json');
+      toast.success('Sample Data-Driven JSON template downloaded!');
+    } catch (err: any) {
+      console.error('Error generating sample JSON template:', err);
+      toast.error('Failed to generate template.');
+    }
+  };
 
   // Generating State
   const [isGenerating, setIsGenerating] = useState(false);
@@ -2385,7 +2586,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
       ? (selectedTool.includes('BDD') ? selectedTool : `${selectedTool} BDD (Cucumber)`)
       : selectedTool;
 
-    const enrichedTargetCases = targetCases.map(tc => {
+    const enrichedTargetCases = targetCases.map((tc, idx) => {
       const parentScen = (project.scenarios || []).find(s =>
         (s.testCases || []).some(c => c.id === tc.id || (c.testCaseId && c.testCaseId === tc.testCaseId))
       );
@@ -2399,6 +2600,19 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
             return String(s || '').trim();
           }).filter(Boolean)
         : [tc.description || tc.title || 'Execute test step action'];
+
+      // Match uploaded test data row if available
+      let matchedDdtRow: Record<string, any> | undefined = undefined;
+      if (dataDrivenData?.rows && dataDrivenData.rows.length > 0) {
+        const cId = String(tc.testCaseId || tc.id || '').toLowerCase().trim();
+        const cTitle = String(tc.title || '').toLowerCase().trim();
+        matchedDdtRow = dataDrivenData.rows.find(row => {
+          const rowId = String(row.testCaseId || row.TestCaseId || row.TC_ID || row.id || row.Id || '').toLowerCase().trim();
+          const rowTitle = String(row.scenario || row.title || row.TestName || '').toLowerCase().trim();
+          return (rowId && (rowId === cId || cId.includes(rowId))) || (rowTitle && (rowTitle === cTitle || cTitle.includes(rowTitle)));
+        }) || dataDrivenData.rows[idx % dataDrivenData.rows.length];
+      }
+
       return {
         ...tc,
         title: tc.title || 'Untitled Test Case',
@@ -2406,7 +2620,8 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
         scenarioTitle: tcAny.scenarioTitle || parentScen?.title || parentScen?.moduleName || 'MainScenario',
         steps: cleanSteps,
         expectedResult: tc.expectedResult || tcAny.expectedResults || 'Action executes successfully and updates UI state.',
-        testData: tc.testData || (Array.isArray(tc.testDataSets) && tc.testDataSets.length > 0 ? tc.testDataSets[0] : '')
+        testData: matchedDdtRow ? JSON.stringify(matchedDdtRow) : (tc.testData || (Array.isArray(tc.testDataSets) && tc.testDataSets.length > 0 ? tc.testDataSets[0] : '')),
+        testDataSets: dataDrivenData?.rows?.length ? dataDrivenData.rows : tc.testDataSets
       };
     });
 
@@ -2417,19 +2632,34 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
       : `${isBddRequested ? 'BDD (Cucumber)' : selectedTool} Automated Suite`;
 
     try {
+      const ddtInstructionSuffix = (dataDrivenData?.rows && dataDrivenData.rows.length > 0)
+        ? `\n\nDATA-DRIVEN TESTING REQUIREMENT:\nThe user uploaded a test data file "${dataDrivenData.fileName}" containing ${dataDrivenData.rows.length} test records with columns: [${dataDrivenData.headers.join(', ')}].\nYou MUST generate reusable automation scripts dynamically without hardcoding parameter values in page classes or test specs.\n1. Populate 'data/testData.json' (or src/test/resources/testData.json for Java) with this exact uploaded dataset.\n2. Ensure tests dynamically read from this dataset and pass parameters into Page Object methods.\n3. Parameterize the test cases across the uploaded dataset rows.`
+        : '';
+
+      const effectiveInstruction = `${instructionText}${ddtInstructionSuffix}`.trim();
+
       const contextPayload: any = {
         appUrl: targetUrl,
         credentials: {
           username: contextEmail,
           password: contextPassword
         },
-        instructionText,
-        architecturalInstructions: instructionText,
+        instructionText: effectiveInstruction,
+        architecturalInstructions: effectiveInstruction,
         skipCreditLogging: true,
         isBdd: isBddRequested,
         generateBdd: isBddRequested,
         pomStructure: true,
-        dataDriven: true
+        dataDriven: true,
+        dataDrivenData: dataDrivenData ? {
+          fileName: dataDrivenData.fileName,
+          sheetName: dataDrivenData.activeSheet,
+          headers: dataDrivenData.headers,
+          rows: dataDrivenData.rows
+        } : undefined,
+        uploadedTestData: dataDrivenData?.rows || undefined,
+        dataDrivenFileName: dataDrivenData?.fileName || undefined,
+        dataDrivenHeaders: dataDrivenData?.headers || undefined
       };
 
       if (screenshots.length > 0) {
@@ -2477,7 +2707,12 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
         tool: toolToUse as any,
         language: selectedLanguage,
         framework: selectedToolName,
-        flowName: title
+        flowName: title,
+        dataDrivenData: dataDrivenData ? {
+          fileName: dataDrivenData.fileName,
+          rows: dataDrivenData.rows,
+          headers: dataDrivenData.headers
+        } : undefined
       });
 
       // Determine the concern folder from selected test cases or selected folders
@@ -2535,7 +2770,10 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
         folderId: concernFolderId,
         folderName: concernFolderName,
         isSaved: false,
-        isImported: false
+        isImported: false,
+        dataDrivenFileName: dataDrivenData?.fileName || undefined,
+        dataDrivenRowsCount: dataDrivenData?.rows?.length || undefined,
+        dataDrivenHeaders: dataDrivenData?.headers || undefined
       };
 
       // Add to unsaved scripts state (user must explicitly save script)
@@ -2546,6 +2784,13 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
       setSelectedFolderIds(new Set());
       setSelectedRepositoryFolder('ALL');
       setArtifactFilter('');
+
+      // Automatic cleanup of uploaded Excel/CSV/JSON test data file once scripts are generated
+      setDataDrivenData(null);
+      setIsDataPreviewOpen(false);
+      try {
+        sessionStorage.removeItem(`automatiqa_ddt_data_${project.id}`);
+      } catch (e) {}
 
       // Prompt user with the Save Script modal to ask for folder and save confirmation
       handleOpenSaveModal(draftScriptObj);
@@ -3624,7 +3869,16 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
         instructionText: instruction.trim(),
         architecturalInstructions: instruction.trim(),
         pomStructure: true,
-        dataDriven: true
+        dataDriven: true,
+        dataDrivenData: dataDrivenData ? {
+          fileName: dataDrivenData.fileName,
+          sheetName: dataDrivenData.activeSheet,
+          headers: dataDrivenData.headers,
+          rows: dataDrivenData.rows
+        } : undefined,
+        uploadedTestData: dataDrivenData?.rows || undefined,
+        dataDrivenFileName: dataDrivenData?.fileName || undefined,
+        dataDrivenHeaders: dataDrivenData?.headers || undefined
       };
 
       if (screenshots.length > 0) {
@@ -3867,7 +4121,299 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
           </div>
         </div>
 
+        {/* Row 2: Data-Driven Testing (DDT) - Optional Excel / CSV Test Data Upload */}
+        <div className="pt-1">
+          {!dataDrivenData ? (
+            <div className="bg-gradient-to-r from-slate-50 via-teal-50/20 to-slate-50 border border-slate-200 rounded-2xl p-4 shadow-2xs hover:border-teal-300 transition-all">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-start sm:items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-teal-50 border border-teal-200 flex items-center justify-center text-teal-600 shrink-0 shadow-2xs">
+                    <FileSpreadsheet size={20} />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-[11px] font-black text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
+                        📊 DATA-DRIVEN TESTING (DDT) — TEST DATA
+                      </span>
+                      <span className="px-2 py-0.5 bg-slate-100 text-slate-600 text-[10px] font-bold rounded-md uppercase tracking-wider">
+                        OPTIONAL
+                      </span>
+                      <span className="px-2 py-0.5 bg-teal-50 text-teal-700 border border-teal-200 text-[10px] font-mono font-bold rounded-md">
+                        .xlsx / .xls / .csv / .json
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Upload an Excel, CSV, or JSON file containing test datasets. The system will use the uploaded data to generate reusable automation scripts dynamically without hardcoding values.
+                    </p>
+                  </div>
+                </div>
 
+                <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
+                  <div className="flex items-center bg-white border border-slate-200 rounded-xl p-0.5 shadow-2xs">
+                    <button
+                      type="button"
+                      onClick={handleDownloadSampleExcel}
+                      className="px-2.5 py-1.5 hover:bg-slate-100 text-slate-700 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer"
+                      title="Download sample Excel (.xlsx) template"
+                    >
+                      <Download size={13} className="text-slate-500" />
+                      <span>Sample (.xlsx)</span>
+                    </button>
+                    <span className="text-slate-200 px-0.5">|</span>
+                    <button
+                      type="button"
+                      onClick={handleDownloadSampleJson}
+                      className="px-2.5 py-1.5 hover:bg-slate-100 text-slate-700 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer"
+                      title="Download sample JSON (.json) template"
+                    >
+                      <Download size={13} className="text-slate-500" />
+                      <span>Sample (.json)</span>
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => excelFileInputRef.current?.click()}
+                    disabled={isParsingExcel}
+                    className="px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white text-xs font-black uppercase tracking-wider rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  >
+                    {isParsingExcel ? (
+                      <RefreshCw size={14} className="animate-spin" />
+                    ) : (
+                      <Upload size={14} />
+                    )}
+                    <span>{isParsingExcel ? 'Parsing File...' : 'Upload Test Data'}</span>
+                  </button>
+                  <input
+                    ref={excelFileInputRef}
+                    type="file"
+                    accept=".xlsx,.xls,.csv,.json,application/json"
+                    className="hidden"
+                    onChange={handleExcelUpload}
+                  />
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="bg-teal-50/70 border border-teal-300 rounded-2xl p-4 shadow-xs space-y-3">
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-teal-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+                    <FileSpreadsheet size={20} />
+                  </div>
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-[11px] font-black text-teal-950 uppercase tracking-wider flex items-center gap-1.5">
+                        📊 DATA-DRIVEN TESTING ACTIVE
+                      </span>
+                      <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 text-[10px] font-bold rounded-md flex items-center gap-1">
+                        <Check size={11} /> Ready for generation
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2.5 text-xs text-slate-700 flex-wrap">
+                      <span className="font-bold text-slate-900 flex items-center gap-1">
+                        <FileText size={13} className="text-teal-600" /> {dataDrivenData.fileName}
+                      </span>
+                      <span className="text-slate-400">•</span>
+                      <span>{(dataDrivenData.fileSize / 1024).toFixed(1)} KB</span>
+                      <span className="text-slate-400">•</span>
+                      <span className="font-bold text-teal-700">{dataDrivenData.rows.length} test records</span>
+                      <span className="text-slate-400">•</span>
+                      <span>{dataDrivenData.headers.length} columns</span>
+                    </div>
+
+                    {/* Worksheet switcher if multiple sheets */}
+                    {dataDrivenData.sheetNames.length > 1 && (
+                      <div className="flex items-center gap-2 pt-1 text-xs">
+                        <span className="text-slate-600 font-bold text-[11px]">Worksheet:</span>
+                        <select
+                          value={dataDrivenData.activeSheet}
+                          onChange={(e) => handleSheetChange(e.target.value)}
+                          className="px-2.5 py-1 bg-white border border-teal-300 rounded-lg text-xs font-semibold text-slate-800 focus:outline-none focus:border-teal-500 cursor-pointer"
+                        >
+                          {dataDrivenData.sheetNames.map(s => (
+                            <option key={s} value={s}>
+                              {s} ({dataDrivenData.allSheetsData?.[s]?.rows?.length || 0} rows)
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
+                    {/* Column pill tags */}
+                    <div className="flex items-center gap-1.5 pt-1 flex-wrap">
+                      <span className="text-[10px] font-black text-slate-500 uppercase">Columns:</span>
+                      {dataDrivenData.headers.slice(0, 8).map((col, i) => (
+                        <span key={i} className="px-2 py-0.5 bg-white border border-teal-200 text-teal-800 rounded-md text-[10px] font-mono font-medium">
+                          {col}
+                        </span>
+                      ))}
+                      {dataDrivenData.headers.length > 8 && (
+                        <span className="text-[10px] text-slate-500 font-bold">
+                          +{dataDrivenData.headers.length - 8} more
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 self-end lg:self-center shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setIsDataPreviewOpen(!isDataPreviewOpen)}
+                    className="px-3 py-2 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                  >
+                    <Eye size={14} className="text-teal-600" />
+                    <span>{isDataPreviewOpen ? 'Hide Preview' : 'Preview Data'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => excelFileInputRef.current?.click()}
+                    className="px-3 py-2 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                  >
+                    <RefreshCw size={13} className="text-slate-500" />
+                    <span>Replace</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDataDrivenData(null);
+                      setIsDataPreviewOpen(false);
+                      toast.info('Test data removed.');
+                    }}
+                    className="px-3 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer"
+                    title="Remove test data"
+                  >
+                    <Trash2 size={14} />
+                    <span>Remove</span>
+                  </button>
+                  <input
+                    ref={excelFileInputRef}
+                    type="file"
+                    accept=".xlsx,.xls,.csv,.json,application/json"
+                    className="hidden"
+                    onChange={handleExcelUpload}
+                  />
+                </div>
+              </div>
+
+              {/* Expandable Preview Section */}
+              {isDataPreviewOpen && (
+                <div className="mt-3 pt-3 border-t border-teal-200">
+                  {dataDrivenData.fileType === 'json' || dataDrivenData.fileName.toLowerCase().endsWith('.json') ? (
+                    previewViewMode === 'json' ? (
+                      <FormattedJsonViewer
+                        jsonText={dataDrivenData.rawJsonText || JSON.stringify(dataDrivenData.rows, null, 2)}
+                        totalRecords={dataDrivenData.rows.length}
+                        fileName={dataDrivenData.fileName}
+                        viewMode={previewViewMode}
+                        onToggleViewMode={(mode) => setPreviewViewMode(mode)}
+                      />
+                    ) : (
+                      <div>
+                        <div className="flex items-center justify-between pb-2">
+                          <span className="text-xs font-bold text-teal-900 uppercase tracking-wide">
+                            Dataset Preview ({dataDrivenData.rows.length} total rows)
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <div className="flex items-center bg-slate-100 p-0.5 rounded-lg border border-slate-200">
+                              <button
+                                type="button"
+                                onClick={() => setPreviewViewMode('json')}
+                                className={`px-2.5 py-1 text-[10px] font-bold rounded-md transition-all cursor-pointer ${
+                                  previewViewMode === 'json'
+                                    ? 'bg-teal-700 text-white shadow-2xs'
+                                    : 'text-slate-600 hover:text-slate-900'
+                                }`}
+                              >
+                                JSON View
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setPreviewViewMode('table')}
+                                className={`px-2.5 py-1 text-[10px] font-bold rounded-md transition-all cursor-pointer ${
+                                  previewViewMode === 'table'
+                                    ? 'bg-teal-700 text-white shadow-2xs'
+                                    : 'text-slate-600 hover:text-slate-900'
+                                }`}
+                              >
+                                Table View
+                              </button>
+                            </div>
+                            <span className="text-[11px] text-slate-500">
+                              Showing up to first 10 rows
+                            </span>
+                          </div>
+                        </div>
+                        <div className="overflow-x-auto rounded-xl border border-teal-200 bg-white max-h-60 scrollbar-thin">
+                          <table className="min-w-full text-xs text-left">
+                            <thead className="bg-slate-50 border-b border-slate-200 text-slate-700 text-[11px] font-black uppercase">
+                              <tr>
+                                <th className="px-3 py-2 text-center w-12 text-slate-400">#</th>
+                                {dataDrivenData.headers.map((h, i) => (
+                                  <th key={i} className="px-3 py-2 font-mono whitespace-nowrap">{h}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100 text-slate-800">
+                              {dataDrivenData.rows.slice(0, 10).map((row, rIdx) => (
+                                <tr key={rIdx} className="hover:bg-slate-50">
+                                  <td className="px-3 py-1.5 text-center text-slate-400 text-[10px] font-mono">{rIdx + 1}</td>
+                                  {dataDrivenData.headers.map((h, cIdx) => (
+                                    <td key={cIdx} className="px-3 py-1.5 whitespace-nowrap max-w-xs truncate text-[11px]">
+                                      {String(row[h] ?? '')}
+                                    </td>
+                                  ))}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )
+                  ) : (
+                    <div>
+                      <div className="flex items-center justify-between pb-2">
+                        <span className="text-xs font-bold text-teal-900 uppercase tracking-wide">
+                          Dataset Preview ({dataDrivenData.rows.length} total rows)
+                        </span>
+                        <span className="text-[11px] text-slate-500">
+                          Showing up to first 10 rows
+                        </span>
+                      </div>
+                      <div className="overflow-x-auto rounded-xl border border-teal-200 bg-white max-h-60 scrollbar-thin">
+                        <table className="min-w-full text-xs text-left">
+                          <thead className="bg-slate-50 border-b border-slate-200 text-slate-700 text-[11px] font-black uppercase">
+                            <tr>
+                              <th className="px-3 py-2 text-center w-12 text-slate-400">#</th>
+                              {dataDrivenData.headers.map((h, i) => (
+                                <th key={i} className="px-3 py-2 font-mono whitespace-nowrap">{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100 text-slate-800">
+                            {dataDrivenData.rows.slice(0, 10).map((row, rIdx) => (
+                              <tr key={rIdx} className="hover:bg-slate-50">
+                                <td className="px-3 py-1.5 text-center text-slate-400 text-[10px] font-mono">{rIdx + 1}</td>
+                                {dataDrivenData.headers.map((h, cIdx) => (
+                                  <td key={cIdx} className="px-3 py-1.5 whitespace-nowrap max-w-xs truncate text-[11px]">
+                                    {String(row[h] ?? '')}
+                                  </td>
+                                ))}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
 
         {/* Row 3: Tabs Bar and Search */}
         <div className="pt-2 border-t border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -5362,6 +5908,12 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
                           <span className="px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider bg-amber-50 text-amber-800 border border-amber-300 flex items-center gap-1">
                             <Sparkles size={10} className="text-amber-600" />
                             Refined • {script.refinedFilePaths.length} Modified
+                          </span>
+                        )}
+                        {Boolean((script as any).dataDrivenFileName || (script as any).dataDrivenRowsCount) && (
+                          <span className="px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider bg-teal-50 text-teal-800 border border-teal-300 flex items-center gap-1">
+                            <FileSpreadsheet size={10} className="text-teal-600" />
+                            Data-Driven • {(script as any).dataDrivenRowsCount || 'Excel'} Rows
                           </span>
                         )}
                       </div>

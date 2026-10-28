@@ -11,6 +11,11 @@ export interface MultiFrameworkGeneratorOptions {
   bddDocument?: BddDocumentParsed;
   platform?: 'web' | 'mobile';
   enableDataDriven?: boolean;
+  dataDrivenData?: {
+    fileName?: string;
+    rows?: Record<string, any>[];
+    headers?: string[];
+  };
 }
 
 export interface MultiFrameworkGeneratorResult {
@@ -1030,6 +1035,11 @@ export function ensureCompleteProjectFiles(
     flowName?: string;
     steps?: RecordedStep[];
     targetUrl?: string;
+    dataDrivenData?: {
+      fileName?: string;
+      rows?: Record<string, any>[];
+      headers?: string[];
+    };
   }
 ): AutomationScriptFile[] {
   const language = normalizeLanguage(options?.language || 'TypeScript');
@@ -1105,6 +1115,28 @@ export function ensureCompleteProjectFiles(
         );
         if (stepDefFile) repairedFiles.push(stepDefFile);
       }
+    }
+  }
+
+  // Ensure Data-Driven Testing dataset file is injected/updated if uploaded test data is provided
+  if (options?.dataDrivenData?.rows && options.dataDrivenData.rows.length > 0) {
+    const formattedDataJson = JSON.stringify(options.dataDrivenData.rows, null, 2);
+    const isJava = language === 'Java';
+    const preferredDataPath = isJava ? 'src/test/resources/testData.json' : 'data/testData.json';
+    const existingDataFileIndex = repairedFiles.findIndex(f => 
+      /(?:^|\/)(?:testData|test_data|data|test-data)\.(?:json|csv)$/i.test(f.path)
+    );
+
+    if (existingDataFileIndex >= 0) {
+      repairedFiles[existingDataFileIndex] = {
+        path: repairedFiles[existingDataFileIndex].path,
+        content: formattedDataJson
+      };
+    } else {
+      repairedFiles.push({
+        path: preferredDataPath,
+        content: formattedDataJson
+      });
     }
   }
 

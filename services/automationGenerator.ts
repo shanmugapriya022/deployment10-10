@@ -21,10 +21,11 @@ export const generateAutomationScript = async (
   tool: AutomationTool,
   language: ProgrammingLanguage,
   framework?: string,
-  bddDoc?: any
+  bddDoc?: any,
+  dataDrivenData?: any
 ): Promise<GeneratedProject> => {
   try {
-    const aiPromise = generateFlowAutomationProject(flow, tool, language, framework, bddDoc);
+    const aiPromise = generateFlowAutomationProject(flow, tool, language, framework, bddDoc, dataDrivenData);
     const timeoutPromise = new Promise<null>((_, reject) =>
       setTimeout(() => reject(new Error('AI script synthesis timeout (15s ceiling reached), using verified POM generator')), 15000)
     );
@@ -37,7 +38,12 @@ export const generateAutomationScript = async (
         framework,
         flowName: flow.name,
         steps: flow.steps,
-        targetUrl: flow.initialUrl || (flow as any).targetUrl
+        targetUrl: flow.initialUrl || (flow as any).targetUrl,
+        dataDrivenData: dataDrivenData ? {
+          fileName: dataDrivenData.fileName,
+          rows: dataDrivenData.rows,
+          headers: dataDrivenData.headers
+        } : undefined
       });
 
       if (
@@ -52,14 +58,19 @@ export const generateAutomationScript = async (
       }
     }
     console.warn(`generateAutomationScript: validation failed for ${language} / ${tool}, generating verified local project.`);
-    const fallback = generateFallbackFlowAutomationProject(flow, tool, language, framework, bddDoc);
+    const fallback = generateFallbackFlowAutomationProject(flow, tool, language, framework, bddDoc, dataDrivenData);
     const completeFallbackFiles = ensureCompleteProjectFiles(fallback.files, {
       tool,
       language,
       framework,
       flowName: flow.name,
       steps: flow.steps,
-      targetUrl: flow.initialUrl || (flow as any).targetUrl
+      targetUrl: flow.initialUrl || (flow as any).targetUrl,
+      dataDrivenData: dataDrivenData ? {
+        fileName: dataDrivenData.fileName,
+        rows: dataDrivenData.rows,
+        headers: dataDrivenData.headers
+      } : undefined
     });
     return {
       ...fallback,
@@ -70,14 +81,19 @@ export const generateAutomationScript = async (
       throw error;
     }
     console.warn("generateAutomationScript error, generating resilient local POM framework:", error);
-    const fallback = generateFallbackFlowAutomationProject(flow, tool, language, framework, bddDoc);
+    const fallback = generateFallbackFlowAutomationProject(flow, tool, language, framework, bddDoc, dataDrivenData);
     const completeFallbackFiles = ensureCompleteProjectFiles(fallback.files, {
       tool,
       language,
       framework,
       flowName: flow.name,
       steps: flow.steps,
-      targetUrl: flow.initialUrl || (flow as any).targetUrl
+      targetUrl: flow.initialUrl || (flow as any).targetUrl,
+      dataDrivenData: dataDrivenData ? {
+        fileName: dataDrivenData.fileName,
+        rows: dataDrivenData.rows,
+        headers: dataDrivenData.headers
+      } : undefined
     });
     return {
       ...fallback,

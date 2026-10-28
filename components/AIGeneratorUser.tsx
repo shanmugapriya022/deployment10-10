@@ -45,7 +45,7 @@ import { ScreenshotUploader, ScreenshotFile } from './ScreenshotUploader';
 import { ScreenshotGallery } from './ScreenshotGallery';
 import { calculateCapacityAndEstimates, getProjectCreditSummary } from '../services/tokenConsumptionService';
 import { canPerformAction, deductProjectCredits, deductProjectCreditsLocal, deductExportCredits } from '../services/creditService';
-import { downloadExcel, downloadCsv } from '../utils/exportUtils';
+import { downloadExcel, downloadCsv, prepareExcelDownload, prepareCsvDownload, triggerPreparedDownload } from '../utils/exportUtils';
 import { ragEnrichPrompt, indexSingleItem } from '../services/ragService';
 import { RAGStatusBadge } from './RAGStatusBadge';
 import { VectorSearchResult } from '../types';

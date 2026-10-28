@@ -233,6 +233,21 @@ export interface AutomationScript {
   refinedFilePaths?: string[];
   deletedFilePaths?: string[];
   lastRefinedAt?: string;
+  dataDrivenFileName?: string;
+  dataDrivenRowsCount?: number;
+  dataDrivenHeaders?: string[];
+}
+
+export interface DataDrivenTestData {
+  fileName: string;
+  fileSize: number;
+  sheetNames: string[];
+  activeSheet: string;
+  headers: string[];
+  rows: Record<string, any>[];
+  allSheetsData?: Record<string, { headers: string[]; rows: Record<string, any>[] }>;
+  rawJsonText?: string;
+  fileType?: 'excel' | 'csv' | 'json';
 }
 
 export interface PerformanceScript {

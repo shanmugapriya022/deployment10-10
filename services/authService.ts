@@ -52,6 +52,14 @@ export function clearStaleAuthSession(options?: { clearFirebaseSdkStorage?: bool
         delete (window as any).__automatiqa_user_name;
         delete (window as any).__automatiqa_user_email;
         delete (window as any).__automatiqa_user_id;
+
+        // Clear any uploaded DDT test data files from session on logout
+        for (let i = sessionStorage.length - 1; i >= 0; i--) {
+          const key = sessionStorage.key(i);
+          if (key && (key.startsWith('automatiqa_ddt_data_') || key.startsWith('automatiqa_record_play_ddt_'))) {
+            sessionStorage.removeItem(key);
+          }
+        }
       } catch (e) {}
     }
 
