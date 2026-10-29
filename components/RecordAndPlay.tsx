@@ -346,6 +346,7 @@ const PLAYBACK_BROWSER_OPTIONS: PlaybackBrowserOption[] = [
 ];
 
 const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdateProject, isFullScreen, onToggleFullScreen, initialPlatform = 'web' }) => {
+  const isProjectSwitchRef = useRef(true);
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [recordingDuration, setRecordingDuration] = useState(0);
@@ -354,7 +355,7 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
 
   useEffect(() => {
     setFlows(project.recordedFlows || []);
-  }, [project.recordedFlows]);
+  }, [project.id, project.recordedFlows]);
 
   const [currentSteps, setCurrentSteps] = useState<RecordedStep[]>([]);
   const [flowName, setFlowName] = useState('New Recording Flow');
@@ -2258,7 +2259,7 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
 
   const [sessionId, setSessionId] = useState<string | null>(() => {
     if (typeof window !== 'undefined') {
-      return localStorage.getItem('automatiqa_session_id');
+      return localStorage.getItem(`automatiqa_session_id_${project.id}`);
     }
     return null;
   });
@@ -2267,56 +2268,73 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
   const isPausedRef = useRef(false);
   const sessionIdRef = useRef<string | null>(null);
   
-  // Initialize currentSteps from localStorage if available
+  // Keep any in-progress recording draft scoped to its project. The old global
+  // keys caused project A's steps/session to be restored while project B was active.
   useEffect(() => {
-    const savedSteps = localStorage.getItem('automatiqa_recorded_steps');
-    if (savedSteps) {
-      try {
-        const parsed = JSON.parse(savedSteps);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          setCurrentSteps(parsed);
+    isProjectSwitchRef.current = true;
+    setActiveFlowId(null);
+    setFlowName('New Recording Flow');
+    setFlowDescription('');
+    setSelectedFolder('');
+    setActiveFolderId(null);
+    setCurrentSteps([]);
+    setIsRecording(false);
+    setIsPaused(false);
+
+    try {
+      const savedSteps = localStorage.getItem(`automatiqa_recorded_steps_${project.id}`);
+      if (savedSteps) {
+        try {
+          const parsed = JSON.parse(savedSteps);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setCurrentSteps(parsed);
+          }
+        } catch (e) {
+          console.error("Failed to parse saved steps:", e);
         }
-      } catch (e) {
-        console.error("Failed to parse saved steps:", e);
       }
-    }
-    
-    const savedRecording = localStorage.getItem('automatiqa_is_recording');
-    if (savedRecording === 'true') {
-      setIsRecording(true);
-      isRecordingRef.current = true;
-    }
-    
-    const savedSessionId = localStorage.getItem('automatiqa_session_id');
-    if (savedSessionId) {
+
+      const savedRecording = localStorage.getItem(`automatiqa_is_recording_${project.id}`) === 'true';
+      setIsRecording(savedRecording);
+      isRecordingRef.current = savedRecording;
+
+      const savedSessionId = localStorage.getItem(`automatiqa_session_id_${project.id}`);
       setSessionId(savedSessionId);
       sessionIdRef.current = savedSessionId;
+    } catch (e) {
+      console.warn('Could not restore project-scoped recording draft:', e);
     }
-  }, []);
+  }, [project.id]);
 
   useEffect(() => { 
+    if (isProjectSwitchRef.current) return;
     isRecordingRef.current = isRecording;
     try {
-      localStorage.setItem('automatiqa_is_recording', isRecording.toString());
+      localStorage.setItem(`automatiqa_is_recording_${project.id}`, isRecording.toString());
     } catch (e) {}
-  }, [isRecording]);
+  }, [isRecording, project.id]);
 
   useEffect(() => { 
     isPausedRef.current = isPaused;
   }, [isPaused]);
 
   useEffect(() => { 
+    if (isProjectSwitchRef.current) return;
     sessionIdRef.current = sessionId;
     try {
       if (sessionId) {
-        localStorage.setItem('automatiqa_session_id', sessionId);
+        localStorage.setItem(`automatiqa_session_id_${project.id}`, sessionId);
       } else {
-        localStorage.removeItem('automatiqa_session_id');
+        localStorage.removeItem(`automatiqa_session_id_${project.id}`);
       }
     } catch (e) {}
-  }, [sessionId]);
+  }, [sessionId, project.id]);
   
   useEffect(() => {
+    if (isProjectSwitchRef.current) {
+      isProjectSwitchRef.current = false;
+      return;
+    }
     console.log("Recorded steps state updated:", currentSteps.length);
     try {
       if (currentSteps.length > 0) {
@@ -2328,14 +2346,14 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
           }
           return step;
         });
-        localStorage.setItem('automatiqa_recorded_steps', JSON.stringify(safeStepsForStorage));
+        localStorage.setItem(`automatiqa_recorded_steps_${project.id}`, JSON.stringify(safeStepsForStorage));
       } else {
-        localStorage.removeItem('automatiqa_recorded_steps');
+        localStorage.removeItem(`automatiqa_recorded_steps_${project.id}`);
       }
     } catch (storageErr) {
       console.warn("Could not persist recorded steps to localStorage (storage quota or disabled):", storageErr);
     }
-  }, [currentSteps]);
+  }, [currentSteps, project.id]);
 
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -3539,9 +3557,9 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
     setShowLiveRecorder(false);
     
     // Clear persistence on stop
-    localStorage.removeItem('automatiqa_is_recording');
-    localStorage.removeItem('automatiqa_session_id');
-    localStorage.removeItem('automatiqa_recorded_steps');
+    localStorage.removeItem(`automatiqa_is_recording_${project.id}`);
+    localStorage.removeItem(`automatiqa_session_id_${project.id}`);
+    localStorage.removeItem(`automatiqa_recorded_steps_${project.id}`);
 
     if (platform === 'mobile') {
       try {

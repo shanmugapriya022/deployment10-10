@@ -269,7 +269,10 @@ interface LastInputDetails {
   const normalizeScenarioContent = <T extends Record<string, any>>(scenario: T): T & { description: string; expectedResults: string } => ({
     ...scenario,
     description: getScenarioText(scenario.description, scenario.scenarioDescription),
-    expectedResults: getScenarioText(scenario.expectedResults, scenario.expectedResult)
+    expectedResults: getScenarioText(scenario.expectedResults, scenario.expectedResult),
+    // Scenario generation must not create test cases. They are generated only
+    // from the explicit Generate AI Test Cases action in TestCaseManager.
+    testCases: []
   });
 
   // Helper to check if item is a test scenario (not a folder or input source or API test scenario)
@@ -1127,7 +1130,7 @@ interface LastInputDetails {
                         description: scenario.description || 'Validate the UI behavior shown in the attached screenshot.',
                         expectedResults: scenario.expectedResults || 'The visible UI behavior matches the documented requirement.',
                         isApproved: false,
-                        testCases: Array.isArray(scenario.testCases) ? scenario.testCases : [],
+                        testCases: [],
                         moduleName: scenario.moduleName || docFileName || 'UI',
                         createdAt: new Date().toISOString(),
                         appUrl: appUrl || '',

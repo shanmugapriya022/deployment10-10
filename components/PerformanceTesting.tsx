@@ -441,7 +441,7 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
         ? `${inputContent}\n\nAI REFINEMENT INSTRUCTIONS:\n${refinementLogic}`
         : inputContent;
 
-      if (ragEnabled) {
+      if (ragEnabled && refinementLogic.trim()) {
         const enriched = await ragEnrichPrompt(inputContent, project.id, 3);
         finalInput = `${enriched.prompt}\n\n${finalInput}`;
         setRetrievedRagChunks(enriched.chunks);
@@ -449,14 +449,32 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
         setRetrievedRagChunks([]);
       }
 
-      const currentScenarios = await generatePerformanceScenarios(finalInput, inputType, ['Performance_Run']) as any[];
-      setScenarios(currentScenarios);
-      
       const profiles: Record<string, any> = {
         'Performance_Run': { vus: cleanVus, rampUp, duration, loopCount: cleanLoop }
       };
 
-      const artifacts = await generateJMeterArtifacts(currentScenarios, finalInput, { profiles });
+      let currentScenarios: any[];
+      let artifacts: { jmx: string; csv: string; instructions: string };
+      if (refinementLogic.trim()) {
+        // Keep AI refinement available when requested, while the common Postman
+        // import path below remains deterministic and cannot hit model timeouts.
+        currentScenarios = await generatePerformanceScenarios(finalInput, inputType, ['Performance_Run']) as any[];
+        artifacts = await generateJMeterArtifacts(currentScenarios, finalInput, { profiles });
+      } else {
+        currentScenarios = [{
+          behavior: 'Requests imported from the supplied Postman collection',
+          type: 'Performance_Run',
+          vus: cleanVus,
+          rampUp,
+          duration
+        }];
+        artifacts = {
+          jmx: generateFallbackJmxXml(currentScenarios, inputContent, { profiles }),
+          csv: 'testCaseId,endpoint,method,payload,expectedCode\nTC-01,/api/test,GET,{},200',
+          instructions: 'Execute JMeter Test Plan: jmeter -n -t plan.jmx -l results.jtl'
+        };
+      }
+      setScenarios(currentScenarios);
       setJmeterArtifacts(artifacts);
 
       // Deduct 50 credits on GENERATE JMX SCRIPT click

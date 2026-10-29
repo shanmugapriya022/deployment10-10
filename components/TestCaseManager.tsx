@@ -4289,12 +4289,11 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
             <button
               type="button"
               onClick={() => {
-                const targets = selectedScenarios.length > 0 
-                  ? selectedScenarios 
-                  : (approvedScenarios.length > 0 ? [approvedScenarios[0]] : []);
-                if (targets.length > 0) {
-                  setScenariosForGenerateModal(targets);
+                if (selectedScenarios.length === 0) {
+                  toast.info('Select one or more scenarios first, then generate AI test cases.');
+                  return;
                 }
+                setScenariosForGenerateModal(selectedScenarios);
               }}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-teal-500 to-indigo-600 hover:from-teal-600 hover:to-indigo-700 text-white rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer active:scale-95"
             >

@@ -897,9 +897,6 @@ export const pruneProjectData = (project: any): any => {
   // Full raw JMX XML, CSV, and analysis reports are safely stored in localStorage ('automatiqa_perf_scripts_<id>') and server disk.
   // Firestore document should strictly hold execution metadata to prevent 1MB overflow.
   if (cloned.performanceScripts && Array.isArray(cloned.performanceScripts)) {
-    if (cloned.performanceScripts.length > 10) {
-      cloned.performanceScripts = cloned.performanceScripts.slice(0, 10);
-    }
     cloned.performanceScripts.forEach((s: any) => {
       // Keep report bodies in the full local/server backup. Truncating their JSON here
       // makes archived reports impossible for the viewer to parse.
@@ -952,9 +949,6 @@ export const pruneProjectData = (project: any): any => {
 
   // 7. PRESERVE PERFORMANCE SCRIPTS: Full data is safely stored in LocalStorage and server disk backup
   if (cloned.performanceScripts && Array.isArray(cloned.performanceScripts)) {
-    if (cloned.performanceScripts.length > 15) {
-      cloned.performanceScripts = cloned.performanceScripts.slice(0, 15);
-    }
     cloned.performanceScripts.forEach((s: any) => {
       s.analysisReport = undefined;
       s.trendData = undefined;
@@ -1347,9 +1341,6 @@ export const pruneProjectDataUltra = (project: any): any => {
     });
   }
   if (ultra.performanceScripts && Array.isArray(ultra.performanceScripts)) {
-    if (ultra.performanceScripts.length > 5) {
-      ultra.performanceScripts = ultra.performanceScripts.slice(0, 5);
-    }
     ultra.performanceScripts.forEach((s: any) => {
       s.jmxStorageRef = 'local';
       s.jmxContent = ''; // Preserved in local storage & disk
@@ -1771,6 +1762,22 @@ export const updateProjectFirestore = async (projectId: string, data: any, optio
                   }))
                 }))
               }));
+              // Keep every saved performance entry's identity and folder linkage in
+              // Firestore's recovery document. The full JMX/report payload remains
+              // in the project backup, but folders must survive even when that backup
+              // is unavailable on a different browser or user session.
+              const compactPerformanceScripts = (finalizedData.performanceScripts || []).map((script: any) => ({
+                id: script.id,
+                name: script.name,
+                title: script.title,
+                type: script.type,
+                folderId: script.folderId,
+                folderName: script.folderName,
+                createdAt: script.createdAt,
+                updatedAt: script.updatedAt,
+                status: script.status,
+                jmxStorageRef: script.jmxStorageRef || 'backup'
+              }));
               // Save core project skeleton to Firestore without merge (all heavy data is already saved on server disk & local storage)
               const minimalDoc: Record<string, any> = {
                 id: projectId,
@@ -1812,6 +1819,16 @@ export const updateProjectFirestore = async (projectId: string, data: any, optio
                   stepsCount: (f.steps || []).length
                 })),
                 apiWorkspaces: compactApiWorkspaces,
+                apiTestSuites: (finalizedData.apiTestSuites || []).map((suite: any) => ({
+                  id: suite.id,
+                  name: suite.name,
+                  title: suite.title,
+                  folderId: suite.folderId,
+                  folderName: suite.folderName,
+                  createdAt: suite.createdAt,
+                  updatedAt: suite.updatedAt
+                })),
+                performanceScripts: compactPerformanceScripts,
                 scenarios: [],
                 updatedAt: serverTimestamp()
               };
