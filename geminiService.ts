@@ -7025,16 +7025,8 @@ export const performUITesting = async (
       // Credit authorization failures must reach the UI. Falling back here
       // would make an unpaid request appear to have produced a real report.
       if (isCreditLimitError(err)) throw err;
-      console.warn('[geminiService] performUITesting clientProxy failed, switching to resilient fallback UI analysis:', err?.message || err);
-      return generateFallbackUIAnalysisReport({
-        screenshots,
-        appUrl,
-        designLink,
-        videoFrames,
-        documents,
-        options,
-        reqInfo: resolveStandardRequirement(options?.standardRequirement, options?.companyStandards)
-      });
+      console.error('[geminiService] performUITesting request failed; refusing to return a synthetic report:', err?.message || err);
+      throw err;
     }
   }
 
@@ -7289,16 +7281,8 @@ If no issues are found on a page, state "**Page Status: MATCHED - PASSED** - No 
       contents: parts,
     }));
   } catch (apiErr: any) {
-    console.warn("[geminiService] performUITesting Gemini API call failed or rate-limited. Generating comprehensive resilient UI audit report:", apiErr?.message || apiErr);
-    return generateFallbackUIAnalysisReport({
-      screenshots,
-      appUrl,
-      designLink,
-      videoFrames,
-      documents,
-      options,
-      reqInfo
-    });
+    console.error("[geminiService] performUITesting Gemini API call failed or rate-limited; refusing to return a synthetic report:", apiErr?.message || apiErr);
+    throw apiErr;
   }
 
   let report = "";
@@ -7315,15 +7299,7 @@ If no issues are found on a page, state "**Page Status: MATCHED - PASSED** - No 
   }
 
   if (!report.trim()) {
-    return generateFallbackUIAnalysisReport({
-      screenshots,
-      appUrl,
-      designLink,
-      videoFrames,
-      documents,
-      options,
-      reqInfo
-    });
+    throw new Error('The AI service returned an empty UI report. Please retry the analysis.');
   }
 
   return { 

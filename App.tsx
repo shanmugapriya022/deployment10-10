@@ -123,6 +123,7 @@ const App: React.FC = () => {
     return null;
   });
   const [isAuthReady, setIsAuthReady] = useState(false);
+  const [isProjectsLoading, setIsProjectsLoading] = useState(false);
   const [testCaseInitialView, setTestCaseInitialView] = useState<'folders' | 'scenarios'>('scenarios');
   const [scriptInitialFolder, setScriptInitialFolder] = useState<{ id?: string; name?: string } | null>(null);
   const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
@@ -700,12 +701,28 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!isAuthReady || !user || !auth.currentUser) {
       setProjects([]);
+      setIsProjectsLoading(false);
       return;
     }
 
     const path = "projects";
     const email = user.email.toLowerCase().trim();
-    const projectsQuery = query(collection(db, path));
+    const roleLower = (user.role as string | undefined)?.toLowerCase().trim();
+    const isSuperAdminUser = (
+      user.role === UserRole.SUPER_ADMIN ||
+      roleLower === 'super admin' ||
+      roleLower === 'super_admin'
+    ) && roleLower !== 'admin' && email !== 'sathya@qaoncloud.com';
+    // Fetch only documents this user can access. Downloading the entire projects
+    // collection delayed the first result and made every login process unrelated
+    // projects before the assigned-project list could be shown.
+    const projectsQuery = isSuperAdminUser
+      ? query(collection(db, path))
+      : query(collection(db, path), or(
+          where('ownerEmail', '==', email),
+          where('allocatedUserEmails', 'array-contains', email)
+        ));
+    if (projectsRef.current.length === 0) setIsProjectsLoading(true);
 
     const unsub = onSnapshot(projectsQuery, (snap) => {
       const rawProjectsData = snap.docs.map(d => {
@@ -1342,12 +1359,6 @@ const App: React.FC = () => {
       });
 
       let filtered: Project[] = [];
-      const userRoleLower = (user.role as string | undefined)?.toLowerCase().trim();
-      const isSuperAdminUser = (user.role === UserRole.SUPER_ADMIN || userRoleLower === 'super admin' || userRoleLower === 'super_admin') && 
-                               userRoleLower !== 'team member' && 
-                               userRoleLower !== 'admin' &&
-                               email !== 'sathya@qaoncloud.com';
-
       if (isSuperAdminUser) {
         // Super Admin - Able to access all the projects
         filtered = projectsData;
@@ -1356,11 +1367,13 @@ const App: React.FC = () => {
         filtered = filterUserAccessibleProjects(projectsData, user);
       }
       setProjects(filtered);
+      setIsProjectsLoading(false);
       try {
         localStorage.setItem(`automatiqa_projects_cache_${email}`, JSON.stringify(filtered));
         localStorage.removeItem('automatiqa_projects_cache');
       } catch (e) {}
     }, (error) => {
+      setIsProjectsLoading(false);
       handleFirestoreError(error, OperationType.LIST, path);
     });
 
@@ -2316,6 +2329,14 @@ const App: React.FC = () => {
     // Guard for project-specific tabs
     const projectTabs = ['ai_user_generator', 'scenarios', 'cases', 'manual', 'execution', 'execution_manual_cases', 'execution_scripts', 'execution_api', 'execution_performance', 'scripts', 'record_play', 'mobile_testing', 'api', 'performance', 'web_performance', 'functional_performance', 'jmeter_performance', 'ui_testing', 'settings_jira', 'settings_github', 'settings_slack'];
     if (projectTabs.includes(activeTab) && !activeProject) {
+      if (isProjectsLoading) {
+        return (
+          <div className="flex flex-col items-center justify-center min-h-[60vh] bg-white rounded-[3rem] border border-slate-100 shadow-sm p-12 text-center">
+            <Loader2 size={36} className="animate-spin text-indigo-500 mb-5" />
+            <p className="text-xs font-black text-slate-500 uppercase tracking-widest">Loading your allocated projects…</p>
+          </div>
+        );
+      }
       return (
         <div className="flex flex-col items-center justify-center min-h-[60vh] bg-white rounded-[3rem] border border-slate-100 shadow-sm p-12 text-center animate-in fade-in duration-500">
           <div className="w-24 h-24 bg-indigo-50 rounded-full flex items-center justify-center text-indigo-600 mb-8 shadow-inner">

@@ -552,8 +552,33 @@ export const getProjectBackupSync = (projectId: string): Project | null => {
 /**
  * Get project from in-memory cache or IndexedDB or LocalStorage
  */
-export const getProjectBackup = async (projectId: string): Promise<Project | null> => {
+export const getProjectBackup = async (
+  projectId: string,
+  options: { preferServer?: boolean } = {}
+): Promise<Project | null> => {
   if (!projectId) return null;
+
+  // Script bodies can be deliberately shortened in Firestore to fit its
+  // document limit. Let editors explicitly fetch the durable full project copy
+  // before falling back to browser caches, which may contain that short copy.
+  if (options.preferServer && typeof window !== 'undefined' && window.fetch) {
+    try {
+      const res = await fetch(`/api/projects/backup/${encodeURIComponent(projectId)}`);
+      if (res.ok) {
+        const serverData = await res.json();
+        if (serverData && serverData.id) {
+          const synced = syncFolderReferences(serverData) as Project;
+          memoryProjectCache.set(projectId, synced);
+          try {
+            localStorage.setItem(`automatiqa_project_backup_${projectId}`, JSON.stringify(synced));
+          } catch {}
+          return synced;
+        }
+      }
+    } catch (err) {
+      console.warn('[storageBackupService] Preferred server backup read failed:', err);
+    }
+  }
 
   // 1. In-memory cache first
   if (memoryProjectCache.has(projectId)) {
@@ -662,10 +687,18 @@ export const filterDeletedScriptFiles = (
 export const mergeAutomationScriptsWithBackup = (
   projectId: string,
   firestoreScripts: AutomationScript[] = [],
-  deletedIds: Set<string> = new Set()
+  deletedIds: Set<string> = new Set(),
+  backupScriptsList: AutomationScript[] = []
 ): AutomationScript[] => {
   const cachedProject = memoryProjectCache.get(projectId);
-  const backupScripts = cachedProject?.automationScripts || [];
+  const backupScriptMap = new Map<string, AutomationScript>();
+  (cachedProject?.automationScripts || []).forEach(script => {
+    if (script?.id) backupScriptMap.set(script.id, script);
+  });
+  (backupScriptsList || []).forEach(script => {
+    if (script?.id) backupScriptMap.set(script.id, script);
+  });
+  const backupScripts = Array.from(backupScriptMap.values());
 
   if (backupScripts.length === 0) {
     return firestoreScripts
@@ -904,6 +937,30 @@ export const mergeRecordedFlowsWithBackup = (
   }
 
   const flowMap = new Map<string, any>();
+  const isTrimmedScriptText = (value: unknown): boolean =>
+    typeof value !== 'string' ||
+    /\[(?:trimmed|truncated) for Firestore\]|content preserved in local storage|Stored with \d+ files/i.test(value);
+  const mergeScriptFiles = (current: any[] = [], backup: any[] = []): any[] => {
+    const files = new Map<string, any>();
+    current.forEach(file => {
+      if (file?.path) files.set(file.path, file);
+    });
+    backup.forEach(file => {
+      if (!file?.path) return;
+      const existing = files.get(file.path);
+      if (!existing ||
+          (isTrimmedScriptText(existing.content) && !isTrimmedScriptText(file.content)) ||
+          (String(file.content || '').length > String(existing.content || '').length && !isTrimmedScriptText(file.content))) {
+        files.set(file.path, existing ? { ...existing, ...file, path: existing.path } : file);
+      }
+    });
+    return Array.from(files.values());
+  };
+  const resolveScriptText = (current: unknown, backup: unknown): unknown => {
+    if (isTrimmedScriptText(current) && !isTrimmedScriptText(backup)) return backup;
+    if (isTrimmedScriptText(backup) && !isTrimmedScriptText(current)) return current;
+    return String(backup || '').length > String(current || '').length ? backup : current || backup;
+  };
 
   // 1. Index firestore flows
   firestoreFlows.forEach(f => {
@@ -923,6 +980,18 @@ export const mergeRecordedFlowsWithBackup = (
       const existingStepsCount = Array.isArray(existing.steps) ? existing.steps.length : 0;
       const backupStepsCount = Array.isArray(bf.steps) ? bf.steps.length : 0;
       const mergedSteps = backupStepsCount >= existingStepsCount ? (bf.steps || []) : (existing.steps || []);
+      const mergedScriptFiles = mergeScriptFiles(existing.scriptFiles || [], bf.scriptFiles || []);
+      const currentGeneratedProject = existing.generatedProject || {};
+      const backupGeneratedProject = bf.generatedProject || {};
+      const mergedGeneratedFiles = mergeScriptFiles(currentGeneratedProject.files || [], backupGeneratedProject.files || []);
+      const mergedGeneratedProject = (Object.keys(currentGeneratedProject).length || Object.keys(backupGeneratedProject).length)
+        ? {
+            ...backupGeneratedProject,
+            ...currentGeneratedProject,
+            files: mergedGeneratedFiles,
+            explanation: currentGeneratedProject.explanation || backupGeneratedProject.explanation
+          }
+        : undefined;
 
       flowMap.set(bf.id, {
         ...existing,
@@ -934,13 +1003,13 @@ export const mergeRecordedFlowsWithBackup = (
         folderId: bf.folderId || existing.folderId,
         folderName: bf.folderName || existing.folderName,
         platform: bf.platform || existing.platform || 'web',
-        generatedScript: bf.generatedScript || existing.generatedScript,
-        scriptFiles: bf.scriptFiles || existing.scriptFiles,
+        generatedScript: resolveScriptText(existing.generatedScript, bf.generatedScript),
+        scriptFiles: mergedScriptFiles,
         scriptId: bf.scriptId || existing.scriptId,
         tool: bf.tool || existing.tool,
         language: bf.language || existing.language,
         framework: bf.framework || existing.framework,
-        generatedProject: bf.generatedProject || existing.generatedProject
+        generatedProject: mergedGeneratedProject
       });
     }
   });

@@ -136,8 +136,8 @@ import { resolveVideoPlayableUrl } from '../services/artifactStorage';
 import { extractApkBundle } from '../services/apkExtractorService';
 import { detectAppArchetype } from '../services/mobileAppDefinitionService';
 import { addTokenLog } from '../services/tokenConsumptionService';
-import { addDeletedIds } from '../services/projectService';
-import { saveProjectBackup } from '../services/storageBackupService';
+import { addDeletedIds, getDeletedIds } from '../services/projectService';
+import { getProjectBackup, mergeRecordedFlowsWithBackup, saveProjectBackup } from '../services/storageBackupService';
 import { 
   BddDocumentParsed, 
   parseBddDocument, 
@@ -346,6 +346,8 @@ const PLAYBACK_BROWSER_OPTIONS: PlaybackBrowserOption[] = [
 ];
 
 const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdateProject, isFullScreen, onToggleFullScreen, initialPlatform = 'web' }) => {
+  const projectRef = useRef(project);
+  projectRef.current = project;
   const isProjectSwitchRef = useRef(true);
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
@@ -356,6 +358,32 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
   useEffect(() => {
     setFlows(project.recordedFlows || []);
   }, [project.id, project.recordedFlows]);
+
+  // Restore the full generated project from the durable backup when the
+  // Firestore copy contains size-limit markers in a recorded flow's script.
+  useEffect(() => {
+    let cancelled = false;
+    const restoreFullFlowScripts = async () => {
+      const backup = await getProjectBackup(project.id, { preferServer: true });
+      if (cancelled || !backup || !Array.isArray(backup.recordedFlows)) return;
+
+      const current = projectRef.current;
+      const mergedFlows = mergeRecordedFlowsWithBackup(
+        project.id,
+        current.recordedFlows || [],
+        getDeletedIds(project.id),
+        backup.recordedFlows
+      );
+      if (JSON.stringify(mergedFlows) !== JSON.stringify(current.recordedFlows || [])) {
+        await onUpdateProject({ ...current, recordedFlows: mergedFlows });
+      }
+    };
+
+    void restoreFullFlowScripts().catch(err => {
+      console.warn('[RecordAndPlay] Could not restore full generated flow scripts from project backup:', err);
+    });
+    return () => { cancelled = true; };
+  }, [project.id]);
 
   const [currentSteps, setCurrentSteps] = useState<RecordedStep[]>([]);
   const [flowName, setFlowName] = useState('New Recording Flow');

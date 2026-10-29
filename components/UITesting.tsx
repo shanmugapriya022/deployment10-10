@@ -62,7 +62,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { compressImage } from '../services/apiUtils';
 import { logActivity } from '../services/activityService';
-import { deductExportCredits } from '../services/creditService';
+import { canPerformAction, deductExportCredits, deductProjectCredits } from '../services/creditService';
 import { saveReportArtifacts, hydrateReportArtifacts, hydrateAllReports, saveVideoBlob, getVideoBlob, resolveVideoPlayableUrl } from '../services/artifactStorage';
 import { ScreenshotImage, ScreenshotPreviewModalContent } from './ScreenshotViewer';
 import { VideoSizeAlertModal } from './VideoSizeAlertModal';
@@ -6079,6 +6079,14 @@ ${bodyHtml}
       return;
     }
 
+    const creditPermission = await canPerformAction(project.id, 'ui_testing', 'analysis', project.name);
+    if (!creditPermission.allowed) {
+      const message = creditPermission.reason || 'UI Testing report generation requires 50 credits.';
+      setError(message);
+      toast.error(message);
+      return;
+    }
+
     const newAnalysisId = `analysis_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
     setCurrentAnalysisId(newAnalysisId);
     activeAnalysisIdRef.current = newAnalysisId;
@@ -6174,6 +6182,17 @@ ${activeVideoFrames.map((f, i) => `#### Frame ${i + 1} (@ Timestamp ${f.timestam
       const reportContent = result?.report?.trim();
       if (!reportContent) {
         throw new Error('No UI analysis report could be generated. Please check your inputs and try again.');
+      }
+
+      const creditDeduction = await deductProjectCredits(
+        project.id,
+        'ui_testing',
+        'analysis',
+        { name: user.name, email: user.email },
+        { projectName: project.name, outputType: 'Generate UI Testing report' }
+      );
+      if (!creditDeduction.success) {
+        throw new Error(creditDeduction.error || 'UI Testing report generation requires 50 credits.');
       }
 
       setReport(reportContent);

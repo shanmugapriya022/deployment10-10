@@ -10535,11 +10535,13 @@ function calculateCreditsConsumedServer(
 ): number {
   if (cached && actionType === 'analysis') return 0;
   
-  const f = (featureName || '').toLowerCase().trim();
+  // Normalize canonical feature keys (for example, "ui_testing") and older
+  // display-name values to the same matching form.
+  const f = (featureName || '').toLowerCase().trim().replace(/[_-]+/g, ' ');
 
   // A Script Generator click can issue several AI requests for batching and
   // coverage repair, but the user is charged 50 credits once for the completed POM suite.
-  if (f === 'automation_script_generation') return 50;
+  if (f === 'automation script generation') return 50;
 
   // 1. AI User Stories Generation: Trial (5 / 20), Paid (5 / 10)
   if (f.includes('user_stories') || f.includes('user_story') || f.includes('user stor') || f.includes('story') || f.includes('stories')) {

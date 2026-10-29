@@ -90,7 +90,7 @@ import { logActivity } from '../services/activityService';
 import { deductProjectCredits, deductExportCredits, canPerformAction } from '../services/creditService';
 import { getDeletedIds, addDeletedIds } from '../services/projectService';
 import { deleteFolderFromFirestore } from '../services/folderPersistenceService';
-import { getProjectBackup, saveProjectBackup, filterDeletedScriptFiles } from '../services/storageBackupService';
+import { getProjectBackup, saveProjectBackup, filterDeletedScriptFiles, mergeAutomationScriptsWithBackup } from '../services/storageBackupService';
 import { formatScriptLanguageAndFramework } from '../utils/automationFrameworkOptions';
 import { generateUniqueFolderId } from '../utils/idGenerator';
 import {
@@ -521,6 +521,35 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
   initialFolderName,
   onClearInitialFolder
 }) => {
+  const projectRef = useRef(project);
+  projectRef.current = project;
+
+  // Firestore keeps compact script text when a project document approaches its
+  // size limit. Restore the durable full files before rendering the repository.
+  useEffect(() => {
+    let cancelled = false;
+    const restoreFullScriptFiles = async () => {
+      const backup = await getProjectBackup(project.id, { preferServer: true });
+      if (cancelled || !backup || !Array.isArray(backup.automationScripts)) return;
+
+      const current = projectRef.current;
+      const mergedScripts = mergeAutomationScriptsWithBackup(
+        project.id,
+        current.automationScripts || [],
+        getDeletedIds(project.id),
+        backup.automationScripts
+      );
+      if (JSON.stringify(mergedScripts) !== JSON.stringify(current.automationScripts || [])) {
+        await onUpdateProject({ ...current, automationScripts: mergedScripts });
+      }
+    };
+
+    void restoreFullScriptFiles().catch(err => {
+      console.warn('[ScriptGenerator] Could not restore full script files from project backup:', err);
+    });
+    return () => { cancelled = true; };
+  }, [project.id]);
+
   // Navigation Tabs: FOLDERS | SCRIPT FOLDERS | IMPORTED SCRIPT FOLDERS
   const userManuallySwitchedTabRef = useRef(false);
   const [activeTab, setActiveTabState] = useState<'folders' | 'scripts' | 'imported'>(() => {
@@ -5763,7 +5792,15 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
             // Resolve files: automatically heal existing scripts if any file has '---', missing paths, or empty file content,
             // and strictly filter out any deleted files so removed files never reappear
             let rawFiles = script.files && script.files.length > 0 ? script.files : [];
-            let hasCorruptFiles = rawFiles.length === 0 || rawFiles.some(f => !f || !f.path || f.path.trim() === '---' || f.path.trim().startsWith('---') || !f.content || f.content.trim().length < 25);
+            let hasCorruptFiles = rawFiles.length === 0 || rawFiles.some(f =>
+              !f ||
+              !f.path ||
+              f.path.trim() === '---' ||
+              f.path.trim().startsWith('---') ||
+              !f.content ||
+              f.content.trim().length < 25 ||
+              /\[(?:trimmed|truncated) for Firestore\]|content preserved in local storage/i.test(f.content)
+            );
 
             // Rehydrate empty file contents from backup if present
             if (hasCorruptFiles) {
@@ -5778,7 +5815,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
                     if (Array.isArray(foundB.files) && foundB.files.some((f: any) => f && f.content && f.content.trim().length > 0)) {
                       backupFiles = foundB.files;
                     }
-                    if (foundB.content && !foundB.content.startsWith('/* POM Suite') && !foundB.content.startsWith('/* Generated script')) {
+                    if (foundB.content && !foundB.content.startsWith('/* POM Suite') && !foundB.content.startsWith('/* Generated script') && !/\[(?:trimmed|truncated) for Firestore\]|content preserved in local storage/i.test(foundB.content)) {
                       backupMarkdown = foundB.content;
                     }
                   }
@@ -5788,9 +5825,9 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
               // Step A: Rehydrate individual file contents from backup if rawFiles has paths
               if (rawFiles.length > 0) {
                 rawFiles = rawFiles.map(f => {
-                  if (!f.content || f.content.trim().length < 25) {
+                  if (!f.content || f.content.trim().length < 25 || /\[(?:trimmed|truncated) for Firestore\]|content preserved in local storage/i.test(f.content)) {
                     const bf = backupFiles.find(b => b.path === f.path || (b.path.split('/').pop() || b.path) === (f.path.split('/').pop() || f.path));
-                    if (bf && bf.content && bf.content.trim().length >= 25) {
+                    if (bf && bf.content && bf.content.trim().length >= 25 && !/\[(?:trimmed|truncated) for Firestore\]|content preserved in local storage/i.test(bf.content)) {
                       return { ...f, content: bf.content };
                     }
                   }
@@ -5799,7 +5836,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
               }
 
               // Step B: If still missing content, attempt parsing from script.content or backupMarkdown
-              const candidateMarkdown = (script.content && !script.content.startsWith('/* POM Suite') && !script.content.startsWith('/* Generated script'))
+              const candidateMarkdown = (script.content && !script.content.startsWith('/* POM Suite') && !script.content.startsWith('/* Generated script') && !/\[(?:trimmed|truncated) for Firestore\]|content preserved in local storage/i.test(script.content))
                 ? script.content
                 : backupMarkdown;
 
