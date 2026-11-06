@@ -1334,6 +1334,9 @@ const App: React.FC = () => {
 
         return syncFolderReferences({
           ...p,
+          jiraConfig: p.jiraConfig || liveProject?.jiraConfig || serverBackup?.jiraConfig,
+          githubConfig: p.githubConfig || liveProject?.githubConfig || serverBackup?.githubConfig,
+          slackConfig: p.slackConfig || liveProject?.slackConfig || serverBackup?.slackConfig,
           scenarios: cleanScenarios,
           userStories: cleanUserStories,
           manualTestCases: cleanManualCases,

@@ -1785,6 +1785,9 @@ export const updateProjectFirestore = async (projectId: string, data: any, optio
                 description: finalizedData.description || '',
                 ownerEmail: finalizedData.ownerEmail || '',
                 allocatedUserEmails: finalizedData.allocatedUserEmails || [],
+                jiraConfig: finalizedData.jiraConfig,
+                githubConfig: finalizedData.githubConfig,
+                slackConfig: finalizedData.slackConfig,
                 automationFolders: finalizedData.automationFolders || [],
                 uiTestingFolders: finalizedData.uiTestingFolders || [],
                 automationScripts: (finalizedData.automationScripts || []).map((s: any) => ({

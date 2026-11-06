@@ -1855,6 +1855,9 @@ export const mergeProjectWithBackupData = (
 
   return syncFolderReferences({
     ...project,
+    jiraConfig: project.jiraConfig || backup.jiraConfig,
+    githubConfig: project.githubConfig || backup.githubConfig,
+    slackConfig: project.slackConfig || backup.slackConfig,
     scenarios: mergedScenarios,
     manualTestCases: mergeRecords(project.manualTestCases || [], backup.manualTestCases || []),
     apiHistory: mergeRecords(project.apiHistory || [], backup.apiHistory || []),
