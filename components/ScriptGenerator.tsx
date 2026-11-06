@@ -595,6 +595,10 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
   const [selectedCaseIds, setSelectedCaseIds] = useState<Set<string>>(new Set());
   const [selectedFolderIds, setSelectedFolderIds] = useState<Set<string>>(new Set());
   const [selectedScriptIds, setSelectedScriptIds] = useState<Set<string>>(new Set());
+  const [mergeTargetScript, setMergeTargetScript] = useState<AutomationScript | null>(null);
+  const [mergeScriptSelection, setMergeScriptSelection] = useState<Set<string>>(new Set());
+  const [mergeScriptSearch, setMergeScriptSearch] = useState('');
+  const [expandedMergeFolders, setExpandedMergeFolders] = useState<Set<string>>(new Set());
   const [showBulkDeleteScriptsConfirm, setShowBulkDeleteScriptsConfirm] = useState(false);
   const [showBulkDeleteCasesConfirm, setShowBulkDeleteCasesConfirm] = useState(false);
   const [showBulkDeleteFoldersConfirm, setShowBulkDeleteFoldersConfirm] = useState(false);
@@ -1461,6 +1465,185 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
 
     return [...validUnsaved, ...validSaved];
   }, [unsavedScripts, savedScripts]);
+
+  const mergeableScripts = useMemo(
+    () => allArtifacts.filter(script => Boolean(script.files?.length || script.content?.trim())),
+    [allArtifacts]
+  );
+  const mergeableScriptFolders = useMemo(() => {
+    const scripts = mergeableScripts.filter(script => script.id !== mergeTargetScript?.id);
+    const query = mergeScriptSearch.trim().toLowerCase();
+    const folders = new Map<string, AutomationScript[]>();
+
+    scripts.forEach(script => {
+      const folderName = (script.folderName || 'General Scripts').trim() || 'General Scripts';
+      const matchesSearch = !query || [
+        folderName, script.title, script.tool, script.language, script.framework
+      ].some(value => String(value || '').toLowerCase().includes(query)) ||
+        (script.files || []).some(file => file.path.toLowerCase().includes(query));
+      if (!matchesSearch) return;
+      const folderScripts = folders.get(folderName) || [];
+      folderScripts.push(script);
+      folders.set(folderName, folderScripts);
+    });
+
+    return Array.from(folders.entries())
+      .sort(([folderA], [folderB]) => folderA.localeCompare(folderB))
+      .map(([folderName, scriptsInFolder]) => ({ folderName, scripts: scriptsInFolder }));
+  }, [mergeableScripts, mergeScriptSearch, mergeTargetScript?.id]);
+
+  const handleOpenMergeScripts = (targetScript: AutomationScript) => {
+    setMergeTargetScript(targetScript);
+    setMergeScriptSelection(new Set());
+    setMergeScriptSearch('');
+    setExpandedMergeFolders(new Set());
+  };
+
+  const handleMergeSelectedScripts = () => {
+    if (!mergeTargetScript) return;
+    const selectedScripts = mergeableScripts.filter(script =>
+      script.id !== mergeTargetScript.id && mergeScriptSelection.has(script.id)
+    );
+    if (selectedScripts.length === 0) {
+      toast.error('Select at least one project script to merge.');
+      return;
+    }
+
+    const targetScript = allArtifacts.find(script => script.id === mergeTargetScript.id) || mergeTargetScript;
+    const targetRawFiles = targetScript.files?.length
+      ? targetScript.files
+      : parseScriptIntoFiles(targetScript.content, targetScript.tool, targetScript.language);
+    const mergedFiles = filterDeletedScriptFiles(
+      targetRawFiles,
+      targetScript.deletedFilePaths || []
+    ).map(file => ({ ...file }));
+    const pathToIndex = new Map(
+      mergedFiles.map((file, index) => [
+        file.path.replace(/\\/g, '/').replace(/^\.?\//, '').toLowerCase(),
+        index
+      ])
+    );
+    const deletedTargetNames = new Set((targetScript.deletedFilePaths || []).map(path =>
+      path.replace(/\\/g, '/').toLowerCase().split('/').pop() || ''
+    ));
+    let addedFileCount = 0;
+    let duplicateFileCount = 0;
+
+    selectedScripts.forEach(sourceScript => {
+      const sourceFiles = sourceScript.files?.length
+        ? sourceScript.files
+        : parseScriptIntoFiles(sourceScript.content, sourceScript.tool, sourceScript.language);
+      const availableFiles = filterDeletedScriptFiles(sourceFiles, sourceScript.deletedFilePaths || []);
+      const sourceFolderName = sourceScript.folderName || 'General Scripts';
+      const safeSourceName = `${sourceFolderName}-${sourceScript.title || 'script'}-${sourceScript.id.slice(-6)}`
+        .replace(/[<>:"|?*]/g, '-')
+        .replace(/[\\/]+/g, '-')
+        .replace(/\s+/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '') || 'script';
+
+      availableFiles.forEach(file => {
+        const relativePath = file.path
+          .replace(/\\/g, '/')
+          .split('/')
+          .filter(segment => segment && segment !== '.' && segment !== '..')
+          .join('/');
+        if (!relativePath || !file.content?.trim()) return;
+
+        const normalizedPath = relativePath.toLowerCase();
+        const baseName = normalizedPath.split('/').pop() || normalizedPath;
+        const existingIndex = pathToIndex.get(normalizedPath);
+        if (existingIndex !== undefined || deletedTargetNames.has(baseName)) {
+          const namespacedRelativePath = deletedTargetNames.has(baseName)
+            ? relativePath.replace(/([^/]+)$/, `${safeSourceName}--$1`)
+            : relativePath;
+          const namespacedPath = `merged/${safeSourceName}/${namespacedRelativePath}`;
+          if (pathToIndex.has(namespacedPath.toLowerCase())) {
+            duplicateFileCount++;
+            return;
+          }
+          if (existingIndex === undefined) {
+            pathToIndex.set(namespacedPath.toLowerCase(), mergedFiles.length);
+            mergedFiles.push({ path: namespacedPath, content: file.content });
+            addedFileCount++;
+            return;
+          }
+          if (mergedFiles[existingIndex].content === file.content) {
+            duplicateFileCount++;
+            return;
+          }
+
+          pathToIndex.set(namespacedPath.toLowerCase(), mergedFiles.length);
+          mergedFiles.push({ path: namespacedPath, content: file.content });
+          addedFileCount++;
+          return;
+        }
+
+        pathToIndex.set(normalizedPath, mergedFiles.length);
+        mergedFiles.push({ path: relativePath, content: file.content });
+        addedFileCount++;
+      });
+    });
+
+    if (addedFileCount === 0) {
+      toast.info(duplicateFileCount > 0
+        ? 'The selected scripts contain no new files to append.'
+        : 'The selected scripts do not contain any mergeable files.');
+      return;
+    }
+
+    const defaultExt = targetScript.language === 'Python' ? 'python'
+      : targetScript.language === 'Java' ? 'java'
+      : targetScript.language === 'TypeScript' ? 'typescript'
+      : 'javascript';
+    const content = mergedFiles.map(file => {
+      const extension = (file.path.split('.').pop() || '').toLowerCase();
+      const language = extension === 'py' ? 'python'
+        : extension === 'java' ? 'java'
+        : extension === 'ts' ? 'typescript'
+        : extension === 'js' ? 'javascript'
+        : extension === 'json' ? 'json'
+        : extension === 'xml' ? 'xml'
+        : extension;
+      return `### \`${file.path}\`\n\`\`\`${language || defaultExt}\n${file.content}\n\`\`\``;
+    }).join('\n\n');
+    const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const updatedScript: AutomationScript = {
+      ...targetScript,
+      files: mergedFiles,
+      content,
+      lastRefinementSummary: `Merged ${addedFileCount} file(s) from ${selectedScripts.length} project script(s).`,
+      refinedFilePaths: mergedFiles.slice(-addedFileCount).map(file => file.path),
+      lastRefinedAt: nowTime
+    };
+
+    const isDraftTarget = targetScript.isSaved === false ||
+      targetScript.id.startsWith('draft-') ||
+      unsavedScripts.some(script => script.id === targetScript.id);
+    if (isDraftTarget) {
+      setUnsavedScripts(previous => {
+        const hasTarget = previous.some(script => script.id === targetScript.id);
+        return hasTarget
+          ? previous.map(script => script.id === targetScript.id ? updatedScript : script)
+          : [updatedScript, ...previous];
+      });
+    } else {
+      const currentScripts = project.automationScripts || [];
+      const hasTarget = currentScripts.some(script => script.id === targetScript.id);
+      const updatedScripts = hasTarget
+        ? currentScripts.map(script => script.id === targetScript.id ? updatedScript : script)
+        : [updatedScript, ...currentScripts];
+      const updatedProject = { ...project, automationScripts: updatedScripts };
+      saveProjectBackup(updatedProject);
+      onUpdateProject(updatedProject);
+    }
+
+    setActiveScriptFile(previous => ({ ...previous, [targetScript.id]: updatedScript.refinedFilePaths?.[0] || '__all__' }));
+    setMergeTargetScript(null);
+    setMergeScriptSelection(new Set());
+    setMergeScriptSearch('');
+    toast.success(`Appended ${addedFileCount} file(s) from ${selectedScripts.length} script(s) to "${targetScript.title}".`);
+  };
 
   // Distinct folders for repository filter
   const repositoryFolders = useMemo(() => {
@@ -4505,7 +4688,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
             </button>
           </div>
 
-          {/* Search Box */}
+          {/* Repository search */}
           <div className="relative shrink-0">
             <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
@@ -5147,6 +5330,17 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
                                       <Plus size={10} className="text-teal-600" />
                                       Append
                                     </button>
+                                    {!viewOnly && (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleOpenMergeScripts(script)}
+                                        className="px-2 py-1 bg-white hover:bg-indigo-50 text-slate-700 hover:text-indigo-700 border border-slate-200 hover:border-indigo-300 rounded-lg text-[10px] font-black uppercase tracking-wider flex items-center gap-1 cursor-pointer transition-all"
+                                        title="Append files from other project scripts into this script"
+                                      >
+                                        <Layers size={10} className="text-indigo-600" />
+                                        Merge
+                                      </button>
+                                    )}
                                     <button
                                       type="button"
                                       onClick={() => handleOpenSaveModal(script)}
@@ -6037,6 +6231,17 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
                       <Plus size={12} className="text-teal-600" />
                       APPEND
                     </button>
+                    {!viewOnly && (
+                      <button
+                        type="button"
+                        onClick={() => handleOpenMergeScripts(script)}
+                        className="px-3 py-1.5 bg-white hover:bg-indigo-50 text-slate-700 hover:text-indigo-700 border border-slate-200 hover:border-indigo-300 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center gap-1 cursor-pointer shadow-2xs"
+                        title="Append files from other project scripts into this script"
+                      >
+                        <Layers size={12} className="text-indigo-600" />
+                        MERGE
+                      </button>
+                    )}
 
                     {/* Edit Title Button */}
                     <button
@@ -7063,6 +7268,180 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
       {/* ========================================================================= */}
       {/* 5. MANUAL SAVE SCRIPT MODAL                                               */}
       {/* ========================================================================= */}
+      {mergeTargetScript && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-xs"
+          onMouseDown={event => {
+            if (event.target === event.currentTarget) setMergeTargetScript(null);
+          }}
+        >
+          <div className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl">
+            <div className="flex items-start justify-between gap-4 border-b border-slate-100 p-5 sm:p-6">
+              <div className="flex items-start gap-3">
+                <div className="rounded-2xl border border-indigo-200 bg-indigo-50 p-2.5 text-indigo-600">
+                  <Layers size={19} />
+                </div>
+                <div>
+                  <h2 className="text-base font-black text-slate-900">Merge Scripts into Existing Script</h2>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Target: <span className="font-bold text-slate-700">{mergeTargetScript.title || 'Untitled script'}</span>
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMergeTargetScript(null)}
+                className="rounded-xl p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+                aria-label="Close merge scripts dialog"
+              >
+                <X size={17} />
+              </button>
+            </div>
+
+            <div className="space-y-3 overflow-y-auto p-5 sm:p-6">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div className="relative min-w-0 flex-1 sm:max-w-sm">
+                  <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="search"
+                    value={mergeScriptSearch}
+                    onChange={event => setMergeScriptSearch(event.target.value)}
+                    placeholder="Search folders and scripts..."
+                    className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2 pl-9 pr-3 text-xs text-slate-800 outline-none transition-colors focus:border-indigo-400 focus:bg-white"
+                  />
+                </div>
+                {mergeableScriptFolders.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const shownIds = mergeableScriptFolders.flatMap(folder => folder.scripts.map(script => script.id));
+                      const allShownSelected = shownIds.length > 0 && shownIds.every(id => mergeScriptSelection.has(id));
+                      setMergeScriptSelection(previous => {
+                        const next = new Set(previous);
+                        shownIds.forEach(id => allShownSelected ? next.delete(id) : next.add(id));
+                        return next;
+                      });
+                    }}
+                    className="self-start rounded-lg px-2.5 py-1.5 text-[11px] font-bold text-indigo-700 transition-colors hover:bg-indigo-50 sm:self-auto"
+                  >
+                    {mergeableScriptFolders.every(folder => folder.scripts.every(script => mergeScriptSelection.has(script.id))) ? 'Deselect visible' : 'Select visible'}
+                  </button>
+                )}
+              </div>
+
+              <div className="max-h-[48vh] space-y-2 overflow-y-auto rounded-2xl border border-slate-200 bg-slate-50/60 p-2">
+                {mergeableScriptFolders.length === 0 ? (
+                  <div className="px-4 py-10 text-center">
+                    <FileCode size={25} className="mx-auto mb-2 text-slate-300" />
+                    <p className="text-xs font-bold text-slate-600">
+                      {mergeableScripts.length === 0 ? 'This project has no scripts to merge yet.' : 'No scripts match your search.'}
+                    </p>
+                    <p className="mt-1 text-[11px] text-slate-400">
+                      Scripts from other projects are not shown here.
+                    </p>
+                  </div>
+                ) : (
+                  mergeableScriptFolders.map(folder => {
+                    const isExpanded = expandedMergeFolders.has(folder.folderName);
+                    return (
+                      <div key={folder.folderName} className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                        <button
+                          type="button"
+                          onClick={() => setExpandedMergeFolders(previous => {
+                            const next = new Set(previous);
+                            if (next.has(folder.folderName)) next.delete(folder.folderName);
+                            else next.add(folder.folderName);
+                            return next;
+                          })}
+                          className="flex w-full items-center gap-2 bg-slate-50 px-3 py-2.5 text-left transition-colors hover:bg-indigo-50/60"
+                        >
+                          {isExpanded ? <ChevronDown size={14} className="text-indigo-600" /> : <ChevronRight size={14} className="text-slate-400" />}
+                          <Folder size={14} className="text-indigo-600" />
+                          <span className="flex-1 truncate text-xs font-black text-slate-800">{folder.folderName}</span>
+                          <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-bold text-slate-500">{folder.scripts.length}</span>
+                        </button>
+                        {isExpanded && (
+                          <div className="space-y-1 border-t border-slate-100 p-2">
+                            {folder.scripts.map(script => {
+                              const checked = mergeScriptSelection.has(script.id);
+                              const files = filterDeletedScriptFiles(
+                                script.files?.length ? script.files : parseScriptIntoFiles(script.content, script.tool, script.language),
+                                script.deletedFilePaths || []
+                              );
+                              return (
+                                <label
+                                  key={script.id}
+                                  className={`flex cursor-pointer items-start gap-2.5 rounded-lg border p-2.5 transition-colors ${
+                                    checked ? 'border-indigo-200 bg-indigo-50/70' : 'border-transparent hover:border-slate-200 hover:bg-slate-50'
+                                  }`}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={checked}
+                                    onChange={() => setMergeScriptSelection(previous => {
+                                      const next = new Set(previous);
+                                      if (next.has(script.id)) next.delete(script.id);
+                                      else next.add(script.id);
+                                      return next;
+                                    })}
+                                    className="mt-0.5 h-4 w-4 shrink-0 accent-indigo-600"
+                                  />
+                                  <span className="min-w-0 flex-1">
+                                    <span className="flex flex-wrap items-center gap-2">
+                                      <span className="truncate text-xs font-black text-slate-800">{script.title || 'Untitled script'}</span>
+                                      {script.isImported && <span className="rounded-full bg-sky-50 px-2 py-0.5 text-[9px] font-bold uppercase text-sky-700">Imported</span>}
+                                      <span className="text-[10px] text-slate-500">{formatScriptLanguageAndFramework(script)}</span>
+                                    </span>
+                                    <span className="mt-1 flex flex-wrap gap-1">
+                                      {files.length ? files.map(file => (
+                                        <span key={file.path} className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[9px] text-slate-500">
+                                          {file.path}
+                                        </span>
+                                      )) : <span className="text-[10px] text-slate-400">No files</span>}
+                                    </span>
+                                  </span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+              <p className="text-[11px] leading-relaxed text-slate-500">
+                Choose a folder to view its scripts, then select scripts to append their files to the target. Existing target files are preserved; conflicting source files are added under a <span className="font-mono font-bold">merged/</span> path.
+              </p>
+            </div>
+
+            <div className="flex flex-col-reverse gap-2 border-t border-slate-100 bg-slate-50 p-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+              <span className="text-[11px] font-bold text-slate-500">
+                {mergeScriptSelection.size} selected
+              </span>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setMergeTargetScript(null)}
+                  className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-bold text-slate-600 transition-colors hover:bg-slate-100"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={mergeScriptSelection.size === 0}
+                  onClick={handleMergeSelectedScripts}
+                  className="flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-black uppercase tracking-wider text-white shadow-sm transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <Layers size={13} />
+                  Merge into Script
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {saveModalScript && (
         <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-in fade-in duration-150">
           <div className="bg-white rounded-3xl max-w-lg w-full p-6 space-y-5 shadow-2xl border border-slate-100 animate-in zoom-in-95 duration-150">

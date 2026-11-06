@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { 
   Play, 
   Square, 
@@ -825,6 +826,12 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
   const [playbackFailureInfo, setPlaybackFailureInfo] = useState<{ stepIndex: number; stepName: string; error: string } | null>(null);
   const [playbackStartTime, setPlaybackStartTime] = useState<number>(0);
   const [playbackEndTime, setPlaybackEndTime] = useState<number>(0);
+  const [pendingOtp, setPendingOtp] = useState<{ sessionId: string; stepIndex: number; attempt: number; screenshot?: string; mode?: 'popup' | 'live_browser' } | null>(null);
+  const [otpValue, setOtpValue] = useState('');
+  const [otpSubmitting, setOtpSubmitting] = useState(false);
+  const [otpTimeoutMs, setOtpTimeoutMs] = useState(300000);
+  const [otpEntryMode, setOtpEntryMode] = useState<'popup' | 'live_browser'>('live_browser');
+  const playbackSessionIdRef = useRef('');
 
   // Universal Web Recording: Permissions & Diagnostics States
   const [pendingPermissionRequest, setPendingPermissionRequest] = useState<BrowserPermissionRequest | null>(null);
@@ -1078,7 +1085,7 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
       {
         timestamp: new Date().toLocaleTimeString(),
         level: 'info',
-        message: `🖥️ Environment Configured: Viewport ${playbackViewport} • Mode: ${isHeadlessPlayback ? 'Headless Driver' : 'Headed Live Window'} • Network: ${playbackNetwork}`
+        message: `🖥️ Environment Configured: Viewport ${playbackViewport} • Mode: ${otpEntryMode === 'live_browser' ? 'Headed Live Window (live OTP)' : isHeadlessPlayback ? 'Headless Driver' : 'Headed Live Window'} • Network: ${playbackNetwork}`
       },
       {
         timestamp: new Date().toLocaleTimeString(),
@@ -1111,6 +1118,9 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
 
     playbackCancelRef.current = false;
     playbackPauseRef.current = false;
+    playbackSessionIdRef.current = globalThis.crypto?.randomUUID?.() || `playback-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    setPendingOtp(null);
+    setOtpValue('');
     setPlaybackFailureInfo(null);
     setPlaybackStartTime(Date.now());
     setPlaybackEndTime(0);
@@ -1230,6 +1240,9 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
           viewport: playbackViewport,
           isHeadless: isHeadlessPlayback,
           stream: true,
+          playbackSessionId: playbackSessionIdRef.current,
+          otpTimeoutMs,
+          otpEntryMode,
           projectId: project?.id,
           projectName: project?.name,
           jiraConfig: project?.jiraConfig,
@@ -1268,6 +1281,14 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
                       clearTimeout(prepTimer);
                       setIsPreparingPlayback(false);
                       if (eventData.type === 'session_ready' && eventData.initialUrl) setPlaybackActiveUrl(eventData.initialUrl);
+                    } else if (eventData.type === 'otp_required') {
+                      playbackPauseRef.current = true;
+                      setPlaybackStatus('paused');
+                      setPendingOtp({ sessionId: eventData.sessionId, stepIndex: eventData.stepIndex, attempt: eventData.attempt || 1, screenshot: eventData.screenshot, mode: eventData.mode || 'popup' });
+                      setOtpValue('');
+                      setPlaybackActiveTab('view');
+                      if (eventData.screenshot) setPlaybackStepScreenshots(prev => ({ ...prev, [`otp-${eventData.stepIndex}-${eventData.attempt || 1}`]: eventData.screenshot }));
+                      setPlaybackLogs(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), level: 'warn', message: `Playback paused for manual OTP entry at step ${(eventData.stepIndex || 0) + 1}.` }]);
                     } else if (eventData.type === 'step_result' && eventData.result) {
                       clearTimeout(prepTimer);
                       setIsPreparingPlayback(false);
@@ -1275,6 +1296,7 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
                     } else if (eventData.type === 'done' || eventData.type === 'error') {
                       clearTimeout(prepTimer);
                       setIsPreparingPlayback(false);
+                      setPendingOtp(null);
                       if (eventData.type === 'done' && !eventData.success && eventData.failedAtStep) {
                         hasFailed = true;
                         setPlaybackFailureInfo({
@@ -1690,10 +1712,15 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
   };
 
   const handleStopPlayback = () => {
+    if (pendingOtp?.sessionId) {
+      void fetch('/api/run-playback/otp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: pendingOtp.sessionId, cancel: true }) }).catch(() => {});
+    }
     playbackCancelRef.current = true;
     playbackPauseRef.current = false;
     setIsPreparingPlayback(false);
     setPlaybackStatus('idle');
+    setPendingOtp(null);
+    setOtpValue('');
     setCurrentPlaybackStepIndex(-1);
     setCursorPos({ x: 15, y: 15 });
     setPrevCursorPos({ x: 15, y: 15 });
@@ -1708,6 +1735,31 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
       });
       setStepExecutionStatus(initialStatuses);
       setStepExecutionTime({});
+    }
+  };
+
+  const handleSubmitPlaybackOtp = async () => {
+    if (!pendingOtp || (pendingOtp.mode !== 'live_browser' && !/^\d{6,8}$/.test(otpValue.trim()))) return;
+    setOtpSubmitting(true);
+    try {
+      const response = await fetch('/api/run-playback/otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(pendingOtp.mode === 'live_browser'
+          ? { sessionId: pendingOtp.sessionId, continue: true }
+          : { sessionId: pendingOtp.sessionId, otp: otpValue.trim() })
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || 'Could not submit OTP. Replay playback if this session has ended.');
+      setPlaybackLogs(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), level: 'info', message: pendingOtp.mode === 'live_browser' ? 'Tester completed OTP in the live browser; code was not captured.' : 'Tester submitted OTP; code was not saved to playback logs.' }]);
+      setPendingOtp(null);
+      setOtpValue('');
+      playbackPauseRef.current = false;
+      setPlaybackStatus('running');
+    } catch (error: any) {
+      toast.error(error?.message || 'OTP submission failed.');
+    } finally {
+      setOtpSubmitting(false);
     }
   };
 
@@ -10011,6 +10063,20 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
                         <option value="Slow 3G">Emulate Slow 3G (500 Kbps)</option>
                       </select>
                     </div>
+                    <div>
+                      <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">OTP Wait Timeout</label>
+                      <select value={otpTimeoutMs} onChange={e => setOtpTimeoutMs(Number(e.target.value))} className="w-full bg-slate-900 border border-slate-800 text-white text-xs rounded-xl px-3 py-2.5 outline-none focus:border-indigo-500 font-mono">
+                        <option value={60000}>1 minute</option><option value={180000}>3 minutes</option><option value={300000}>5 minutes</option><option value={600000}>10 minutes</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">OTP Entry Mode</label>
+                      <select value={otpEntryMode} onChange={e => setOtpEntryMode(e.target.value as 'popup' | 'live_browser')} className="w-full bg-slate-900 border border-slate-800 text-white text-xs rounded-xl px-3 py-2.5 outline-none focus:border-indigo-500 font-mono">
+                        <option value="popup">Enter code in AutomatiQA popup</option>
+                        <option value="live_browser">Enter on live browser screen</option>
+                      </select>
+                      {otpEntryMode === 'live_browser' && <p className="mt-1.5 text-[10px] text-amber-300">Opens a visible browser window on the playback server machine.</p>}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -10971,6 +11037,28 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
           </motion.div>
         )}
       </AnimatePresence>
+
+      {pendingOtp && createPortal(
+        <div style={{ zIndex: 2147483647 }} className="fixed inset-0 flex items-center justify-center bg-slate-950/90 backdrop-blur-md p-4">
+          <form onSubmit={e => { e.preventDefault(); void handleSubmitPlaybackOtp(); }} className="w-full max-w-md rounded-3xl border border-indigo-400/30 bg-slate-900 p-7 text-white shadow-2xl">
+            <div className="mb-5 flex items-center gap-3">
+              <div className="rounded-xl bg-indigo-500/15 p-3 text-indigo-300"><ShieldCheck size={22} /></div>
+              <div><h2 className="text-lg font-black">TOTP Verification Required</h2><p className="text-xs text-slate-400">The active playback session is paused.</p></div>
+            </div>
+            <p className="mb-5 text-sm text-slate-300">{pendingOtp.mode === 'live_browser' ? 'Enter and submit your authenticator code in the visible browser window. Then return here and continue playback. The code is not captured by AutomatiQA.' : 'Enter the current authenticator code to continue playback. The code is sent to the active Playwright session and is not saved in reports.'}</p>
+            {pendingOtp.screenshot && <img className="mb-5 max-h-40 w-full rounded-xl border border-slate-700 object-cover" src={pendingOtp.screenshot} alt="OTP verification screen" />}
+            {pendingOtp.mode !== 'live_browser' && <>
+              <label htmlFor="playback-otp" className="mb-2 block text-xs font-bold uppercase tracking-wider text-slate-400">Authenticator code</label>
+              <input id="playback-otp" autoFocus inputMode="numeric" autoComplete="one-time-code" maxLength={8} value={otpValue} onChange={e => setOtpValue(e.target.value.replace(/\D/g, '').slice(0, 8))} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-center font-mono text-xl tracking-[0.4em] outline-none focus:border-indigo-400" placeholder="••••••" />
+            </>}
+            <p className="mt-3 text-[11px] text-slate-500">Wait timeout: {Math.round(otpTimeoutMs / 60000)} minute(s). Rejected or expired codes can be retried.</p>
+            <div className="mt-6 flex justify-end gap-3">
+              <button type="button" onClick={handleStopPlayback} className="rounded-xl border border-slate-700 px-4 py-2.5 text-xs font-bold text-slate-300 hover:bg-slate-800">Stop playback</button>
+              <button type="submit" disabled={otpSubmitting || (pendingOtp.mode !== 'live_browser' && !/^\d{6,8}$/.test(otpValue.trim()))} className="flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-xs font-black uppercase tracking-wider text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-40">{otpSubmitting && <Loader2 size={14} className="animate-spin" />} {pendingOtp.mode === 'live_browser' ? 'I completed OTP — Resume' : 'Submit OTP'}</button>
+            </div>
+          </form>
+        </div>, document.body
+      )}
 
       {/* Recorded Video Player Modal */}
       <RecordedVideoModal

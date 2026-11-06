@@ -727,7 +727,7 @@ export const QA_COPILOT_KNOWLEDGE_BASE: QACopilotKnowledgeDoc[] = [
       }
     ],
     creditInformation: [
-      { action: 'Mobile Analysis & Script Synthesis', trialCost: '100 Credits', paidCost: '100 Credits', description: 'Per Appium script generation.' },
+      { action: 'Mobile Analysis & Script Synthesis', trialCost: '50 Credits', paidCost: '50 Credits', description: 'Per Appium script generation.' },
       { action: 'Copy / Download', trialCost: '50 Credits', paidCost: '50 Credits', description: 'Official copy or export.' }
     ],
     permissions: [

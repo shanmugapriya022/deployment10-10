@@ -139,7 +139,7 @@ export interface FeatureCreditRule {
  * 3. AI Test Cases Generation            | 20             | 20           | 20            | 20
  * 4. Automation - Script Generator       | 50             | 50           | 50            | 50
  * 5. Automation - Record & Play - Web App| 100            | 50           | 100           | 50
- * 6. Automation - Record & Play - Mobile | 100            | 50           | 100           | 50
+ * 6. Automation - Record & Play - Mobile | 50             | 50           | 50            | 50
  * 7. UI Testing                          | 50             | 50           | 50            | 50
  * 8. API Testing                         | 50             | 50           | 50            | 50
  * 9. API Performance Testing             | 100            | 50           | 100           | 50

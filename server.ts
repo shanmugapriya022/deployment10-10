@@ -677,6 +677,9 @@ async function openUrl(rawUrl: string, page: Page, sessionId?: string): Promise<
 }
 
 async function startServer() {
+  const playbackOtpWaiters = new Map<string, (otp: string) => void>();
+  const activePlaybackSessions = new Set<string>();
+  const queuedPlaybackOtps = new Map<string, string>();
   const app = express();
   app.use(compression());
   app.use(express.json({ limit: '100mb' }));
@@ -7344,6 +7347,23 @@ async function startServer() {
   }
 
   // Real-time Backend Playwright Playback Execution Engine
+  app.post('/api/run-playback/otp', (req, res) => {
+    const sessionId = String(req.body?.sessionId || '');
+    const otp = req.body?.cancel ? '\u0000CANCEL' : req.body?.continue ? '\u0000CONTINUE' : String(req.body?.otp || '').trim();
+    if (!['\u0000CANCEL', '\u0000CONTINUE'].includes(otp) && !/^\d{6,8}$/.test(otp)) return res.status(400).json({ error: 'Enter a 6 to 8 digit code.' });
+    const resolveOtp = playbackOtpWaiters.get(sessionId);
+    if (resolveOtp) {
+      playbackOtpWaiters.delete(sessionId);
+      resolveOtp(otp);
+      return res.json({ success: true });
+    }
+    if (activePlaybackSessions.has(sessionId)) {
+      queuedPlaybackOtps.set(sessionId, otp);
+      return res.json({ success: true, queued: true });
+    }
+    return res.status(410).json({ error: 'Playback session has ended. Replay the flow to enter a fresh OTP.' });
+  });
+
   app.post("/api/run-playback", async (req, res) => {
     const { 
       steps, 
@@ -7360,9 +7380,13 @@ async function startServer() {
       appUrl,
       syntheticUsers
     } = req.body;
+    const playbackSessionId = String(req.body?.playbackSessionId || '');
+    const otpTimeoutMs = Math.max(30000, Math.min(600000, Number(req.body?.otpTimeoutMs) || 300000));
+    const manualOtpInBrowser = req.body?.otpEntryMode === 'live_browser';
     if (!steps || !Array.isArray(steps) || steps.length === 0) {
       return res.status(400).json({ error: "Steps array is required" });
     }
+    if (playbackSessionId) activePlaybackSessions.add(playbackSessionId);
 
     const isStreaming = stream === true || req.headers.accept?.includes('text/event-stream');
     if (isStreaming) {
@@ -7376,6 +7400,11 @@ async function startServer() {
       });
       res.on('close', () => {
         console.log("[Playback Engine] client stream closed before completion");
+        const resolvePendingOtp = playbackOtpWaiters.get(playbackSessionId);
+        if (resolvePendingOtp) {
+          playbackOtpWaiters.delete(playbackSessionId);
+          resolvePendingOtp('\u0000CANCEL');
+        }
       });
     }
 
@@ -7403,7 +7432,7 @@ async function startServer() {
       }
 
       try {
-        browser = await launchPlaywrightBrowser({ headless: true });
+        browser = await launchPlaywrightBrowser({ headless: manualOtpInBrowser ? false : isHeadless !== false });
       } catch (browserErr: any) {
         console.error("[Playback Engine] Playwright launch error:", browserErr);
         if (isStreaming) {
@@ -7687,8 +7716,25 @@ async function startServer() {
         pageTitle: await page.title().catch(() => '')
       });
 
+      let manualOtpSkipThrough = -1;
       for (let i = 0; i < steps.length; i++) {
         const step = steps[i];
+        const stepOtpLabel = `${step.locator?.primary?.value || ''} ${step.elementName || ''} ${step.placeholder || ''} ${step.selector || ''}`;
+        const stepLooksLikeOtp = /otp|totp|one.?time.?code|verification code|authenticator/i.test(stepOtpLabel);
+        const stepActionName = String(step.action || '').toLowerCase();
+        const isOtpDigitStep = stepLooksLikeOtp && ['fill', 'type', 'click', 'focus'].includes(stepActionName);
+        const isOtpWaitStep = ['assertion', 'wait'].includes(stepActionName);
+        const isOtpSubmitStep = ['click', 'submit', 'press'].includes(stepActionName) && /verify|submit|continue|confirm/i.test(stepOtpLabel);
+        if (i <= manualOtpSkipThrough && (isOtpDigitStep || isOtpWaitStep || isOtpSubmitStep)) {
+          const satisfiedOtpStep = {
+            stepId: step.id, stepIndex: i, action: step.action, status: 'passed', duration: 0,
+            error: 'Satisfied by tester-entered OTP.', resultingUrl: page.url() || currentUrl,
+            pageTitle: await page.title().catch(() => ''), screenshot: '', redirectChain: []
+          };
+          results.push(satisfiedOtpStep);
+          sendEvent('step_result', { result: satisfiedOtpStep });
+          continue;
+        }
         if (step.skipped) {
           const skippedRes = {
             stepId: step.id,
@@ -7710,6 +7756,7 @@ async function startServer() {
         let stepPassed = true;
         let stepError = '';
         let stepInteractRes: any = null;
+        let manualOtpStepFilled = false;
 
         try {
           const action = step.action;
@@ -7825,6 +7872,155 @@ async function startServer() {
 
           page = targetPage;
           const urlBeforeAction = targetPage.url();
+
+          // OTP checkpoints are driven by recorded step metadata, so navigation
+          // to /totp is allowed to finish before playback pauses at an OTP field.
+          if (stepLooksLikeOtp && action !== 'navigate' && playbackSessionId) {
+            const otpTimeoutMs = Math.max(30000, Math.min(600000, Number(req.body?.otpTimeoutMs) || 300000));
+            let otpAttempt = 0;
+            let otpAccepted = false;
+            while (!otpAccepted) {
+              otpAttempt++;
+              const otpScreenshot = await targetPage.screenshot({ type: 'jpeg', quality: 55, fullPage: false, timeout: 2500 })
+                .then(buf => `data:image/jpeg;base64,${buf.toString('base64')}`).catch(() => '');
+              let otp: string;
+              const queuedOtp = queuedPlaybackOtps.get(playbackSessionId);
+              if (queuedOtp !== undefined) {
+                otp = queuedOtp;
+                queuedPlaybackOtps.delete(playbackSessionId);
+              } else {
+                let resolveOtp!: (code: string) => void;
+                const otpPromise = new Promise<string>(resolve => { resolveOtp = resolve; });
+                playbackOtpWaiters.set(playbackSessionId, resolveOtp);
+                sendEvent('otp_required', { sessionId: playbackSessionId, stepIndex: i, attempt: otpAttempt, timeoutMs: otpTimeoutMs, screenshot: otpScreenshot, mode: manualOtpInBrowser ? 'live_browser' : 'popup' });
+                let timeoutId: ReturnType<typeof setTimeout>;
+                const timeoutPromise = new Promise<never>((_, reject) => {
+                  timeoutId = setTimeout(() => reject(new Error(`Timed out waiting for manual OTP entry (${Math.round(otpTimeoutMs / 60000)} minutes).`)), otpTimeoutMs);
+                });
+                try { otp = await Promise.race([otpPromise, timeoutPromise]); }
+                finally { clearTimeout(timeoutId!); playbackOtpWaiters.delete(playbackSessionId); }
+              }
+              if (otp === '\u0000CANCEL') throw new Error('Playback stopped while waiting for OTP.');
+
+              const otpSelector = 'input[autocomplete="one-time-code"], input[aria-label*="otp" i], input[placeholder*="otp" i], input[name*="otp" i], input[id*="otp" i], input[maxlength="1"], input[inputmode="numeric"]';
+              const otpInputs = targetPage.locator(otpSelector);
+              const candidateCount = await otpInputs.count().catch(() => 0);
+              const visibleIndexes = candidateCount > 0 ? await otpInputs.evaluateAll((els: Element[]) => els.map((el, index) => {
+                const input = el as HTMLInputElement;
+                const style = window.getComputedStyle(input);
+                return !input.disabled && style.display !== 'none' && style.visibility !== 'hidden' && input.getClientRects().length > 0 ? index : -1;
+              }).filter(index => index >= 0)) : [];
+              const accessibleOtpInputs = targetPage.getByRole('textbox', { name: /otp|totp|verification code|one-time-code/i });
+              const accessibleCount = await accessibleOtpInputs.count().catch(() => 0);
+              const visibleAccessibleIndexes = accessibleCount > 0
+                ? await accessibleOtpInputs.evaluateAll((els: Element[]) => els.map((el, index) => {
+                    const input = el as HTMLInputElement;
+                    const style = window.getComputedStyle(input);
+                    return !input.disabled && style.display !== 'none' && style.visibility !== 'hidden' && input.getClientRects().length > 0 ? index : -1;
+                  }).filter(index => index >= 0)).catch(() => [])
+                : [];
+              if (manualOtpInBrowser) {
+                if (otp !== '\u0000CONTINUE') throw new Error('Expected live-browser OTP confirmation.');
+                if (visibleIndexes.length > 0 || visibleAccessibleIndexes.length > 0) {
+                  // Keep the same browser session paused until the user has
+                  // submitted the OTP and the verification inputs disappear.
+                  manualOtpStepFilled = false;
+                  continue;
+                }
+                let lastOtpStep = i;
+                for (let nextIndex = i + 1; nextIndex < steps.length; nextIndex++) {
+                  const nextStep = steps[nextIndex];
+                  const nextLabel = `${nextStep.locator?.primary?.value || ''} ${nextStep.elementName || ''} ${nextStep.placeholder || ''}`;
+                  const nextAction = String(nextStep.action || '').toLowerCase();
+                  if (/otp|totp|one.?time.?code|verification code|authenticator/i.test(nextLabel) && ['fill', 'type', 'click', 'focus'].includes(nextAction)) {
+                    lastOtpStep = nextIndex;
+                    continue;
+                  }
+                  if (['assertion', 'wait'].includes(nextAction)) {
+                    lastOtpStep = nextIndex;
+                    continue;
+                  }
+                  if (['click', 'submit', 'press'].includes(nextAction) && /verify|submit|continue|confirm/i.test(nextLabel)) {
+                    lastOtpStep = nextIndex;
+                    break;
+                  }
+                  break;
+                }
+                manualOtpSkipThrough = Math.max(manualOtpSkipThrough, lastOtpStep);
+                const nextRecordedStep = steps.slice(lastOtpStep + 1).find((candidate: any) => !candidate.skipped);
+                const nextAction = String(nextRecordedStep?.action || '').toLowerCase();
+                const expectedNextUrl = nextAction === 'navigate'
+                  ? ''
+                  : nextRecordedStep?.expectedUrl || nextRecordedStep?.pageUrl || nextRecordedStep?.url;
+                if (expectedNextUrl && /^https?:\/\//i.test(expectedNextUrl) && !urlsMatchOriginAndPath(targetPage.url(), expectedNextUrl)) {
+                  await targetPage.waitForURL(url => urlsMatchOriginAndPath(url.toString(), expectedNextUrl), { timeout: 10000 }).catch(() => {});
+                }
+                await targetPage.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+                manualOtpStepFilled = true;
+                otpAccepted = true;
+                break;
+              }
+              if (otp === '\u0000CONTINUE') throw new Error('Live-browser OTP confirmation was submitted for popup entry mode.');
+              if (visibleIndexes.length >= otp.length && otp.length > 1) {
+                for (let digit = 0; digit < otp.length; digit++) await otpInputs.nth(visibleIndexes[digit]).fill(otp[digit]);
+              } else if (visibleAccessibleIndexes.length >= otp.length && otp.length > 1) {
+                for (let digit = 0; digit < otp.length; digit++) await accessibleOtpInputs.nth(visibleAccessibleIndexes[digit]).fill(otp[digit]);
+              } else if (visibleIndexes.length > 0) {
+                await otpInputs.nth(visibleIndexes[0]).fill(otp);
+              } else if (visibleAccessibleIndexes.length > 0) {
+                await accessibleOtpInputs.nth(visibleAccessibleIndexes[0]).fill(otp);
+              } else {
+                const fillResult = await findAndInteractElement(targetPage, step, 'fill', otp);
+                if (!fillResult.success) throw new Error(`OTP step detected, but no OTP input could be filled: ${fillResult.error || 'input not found'}`);
+              }
+
+              let lastOtpStep = i;
+              for (let nextIndex = i + 1; nextIndex < steps.length; nextIndex++) {
+                const nextStep = steps[nextIndex];
+                const nextLabel = `${nextStep.locator?.primary?.value || ''} ${nextStep.elementName || ''} ${nextStep.placeholder || ''}`;
+                const nextAction = String(nextStep.action || '').toLowerCase();
+                if (/otp|totp|one.?time.?code|verification code|authenticator/i.test(nextLabel) && ['fill', 'type', 'click', 'focus'].includes(nextAction)) {
+                  lastOtpStep = nextIndex;
+                  continue;
+                }
+                if (['assertion', 'wait'].includes(nextAction)) {
+                  lastOtpStep = nextIndex;
+                  continue;
+                }
+                if (['click', 'submit', 'press'].includes(nextAction) && /verify|submit|continue|confirm/i.test(nextLabel)) {
+                  lastOtpStep = nextIndex;
+                  break;
+                }
+                break;
+              }
+              manualOtpSkipThrough = Math.max(manualOtpSkipThrough, lastOtpStep);
+              manualOtpStepFilled = true;
+
+              const verifyButton = targetPage.getByRole('button', { name: /verify and proceed|verify|submit|continue|confirm/i }).first();
+              if (await verifyButton.isVisible().catch(() => false) && await verifyButton.isEnabled().catch(() => false)) {
+                await verifyButton.click({ timeout: 5000 });
+                await Promise.race([
+                  targetPage.waitForURL(url => url.toString() !== urlBeforeAction, { timeout: 8000 }).catch(() => {}),
+                  targetPage.waitForTimeout(1500)
+                ]);
+              } else if (visibleIndexes.length > 0) {
+                await otpInputs.nth(visibleIndexes[0]).press('Enter').catch(() => {});
+              }
+              await targetPage.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+              const remainingOtpFields = await otpInputs.evaluateAll((els: Element[]) => els.some(el => {
+                const input = el as HTMLInputElement;
+                const style = window.getComputedStyle(input);
+                return !input.disabled && style.display !== 'none' && style.visibility !== 'hidden' && input.getClientRects().length > 0;
+              })).catch(() => false);
+              const remainingAccessibleOtpFields = await accessibleOtpInputs.evaluateAll((els: Element[]) => els.some(el => {
+                const input = el as HTMLInputElement;
+                const style = window.getComputedStyle(input);
+                return !input.disabled && style.display !== 'none' && style.visibility !== 'hidden' && input.getClientRects().length > 0;
+              })).catch(() => false);
+              if (!remainingOtpFields && !remainingAccessibleOtpFields) otpAccepted = true;
+              else manualOtpStepFilled = false;
+            }
+          }
 
           console.log(`[Playback Engine] Step ${i + 1}/${steps.length}: [${action.toUpperCase()}] Selector: "${selector}" Value: "${value}" PageId: "${stepPageId || 'default'}" Current URL: "${urlBeforeAction}"`);
 
@@ -7969,7 +8165,9 @@ async function startServer() {
           // Ensure target page is completely ready and fully loaded before performing step
           await ensurePageFullyReady(targetPage, 10000);
 
-          if (action === 'navigate') {
+          if (manualOtpStepFilled) {
+            stepPassed = true;
+          } else if (action === 'navigate') {
             const rawTargetNav = step.url || step.value || (step.locator?.primary?.type === 'url' ? step.locator?.primary?.value : '');
             const targetNav = rawTargetNav ? (resolveCandidateNavUrl(step, currentUrl) || resolveFullStepUrl(rawTargetNav, currentUrl) || sanitizeUrl(rawTargetNav)) : null;
             if (!targetNav) {
@@ -8222,6 +8420,11 @@ async function startServer() {
         });
       }
     } finally {
+      if (playbackSessionId) {
+        activePlaybackSessions.delete(playbackSessionId);
+        queuedPlaybackOtps.delete(playbackSessionId);
+        playbackOtpWaiters.delete(playbackSessionId);
+      }
       if (browser) {
         await browser.close().catch(() => {});
       }
@@ -10575,10 +10778,10 @@ function calculateCreditsConsumedServer(
     return planType === 'Paid' ? 50 : 100;
   }
 
-  // 6. Automation - Record & Play - Mobile App: Trial (100 / 50), Paid (100 / 50)
+  // 6. Automation - Record & Play - Mobile App: Trial (50 / 50), Paid (50 / 50)
   if (f.includes('mobile') || f.includes('appium')) {
     if (actionType === 'export') return 50;
-    return 100;
+    return 50;
   }
 
   // Generic record and play
