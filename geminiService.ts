@@ -420,7 +420,8 @@ async function clientProxy(functionName: string, args: any[]): Promise<any> {
         // batched and coverage-repair AI requests must not each charge credits.
         skipCreditLogging:
           (functionName === 'generateAutomationScript' && Boolean(args?.[2]?.skipCreditLogging)) ||
-          (functionName === 'generateScenariosFromInput' && Boolean(args?.[2]?.skipCreditLogging)),
+          (functionName === 'generateScenariosFromInput' && Boolean(args?.[2]?.skipCreditLogging)) ||
+          (functionName === 'generateFlowAutomationProject' && args?.[0]?.platform === 'mobile'),
         planType: currentProjPlan?.planType || 'Paid',
         clientPlanHint: currentProjPlan?.planType || 'Paid'
       };

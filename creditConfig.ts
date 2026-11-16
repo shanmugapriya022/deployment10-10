@@ -27,7 +27,8 @@ export interface ModuleCreditRates {
  * 3. AI Test Cases Generation            | 20             | 20         | 20             | 20            | 20        | 20
  * 4. Automation - Script Generator       | 50             | 50         | 50             | 50            | 50        | 50
  * 5. Automation - Record & Play - Web App| 100            | 50         | 50             | 100           | 50        | 50
- * 6. Automation - Record & Play - Mobile | 50             | 50         | 50             | 50            | 50        | 50
+ * 6. Automation - Record & Play - Mobile | 50             | 20         | 20             | 50            | 20        | 20
+ * 7. Automation - Playback               | 50             | 50         | 50             | 50            | 50        | 50
  * 7. UI Testing                          | 50             | 50         | 50             | 50            | 50        | 50
  * 8. API Testing                         | 50             | 50         | 50             | 50            | 50        | 50
  * 9. API Performance Testing             | 100            | 50         | 50             | 100           | 50        | 50
@@ -79,6 +80,13 @@ export const FEATURE_CREDIT_CONFIG: Record<string, ModuleCreditRates> = {
     description: 'Record mobile touch events, gestures, and screens, generate Appium scripts. Export/download mobile test package.',
     trial: { analysis: 50, copy: 20, download: 20 },
     paid: { analysis: 50, copy: 20, download: 20 }
+  },
+  record_playback: {
+    featureKey: 'record_playback',
+    displayName: 'Automation - Playback',
+    description: 'Execute a recorded playback flow. Data-driven batches are charged once per session.',
+    trial: { analysis: 50, copy: 50, download: 50 },
+    paid: { analysis: 50, copy: 50, download: 50 }
   },
   ui_testing: {
     featureKey: 'ui_testing',

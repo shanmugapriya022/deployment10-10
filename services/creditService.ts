@@ -40,6 +40,11 @@ export const TRIAL_PLAN = {
     downloadCopy: 20
   },
 
+  RECORD_PLAYBACK: {
+    analysis: 50,
+    downloadCopy: 50
+  },
+
   UI_TESTING: {
     analysis: 50,
     downloadCopy: 50
@@ -94,6 +99,11 @@ export const PAID_PLAN = {
     downloadCopy: 20
   },
 
+  RECORD_PLAYBACK: {
+    analysis: 50,
+    downloadCopy: 50
+  },
+
   UI_TESTING: {
     analysis: 50,
     downloadCopy: 50
@@ -139,7 +149,7 @@ export interface FeatureCreditRule {
  * 3. AI Test Cases Generation            | 20             | 20           | 20            | 20
  * 4. Automation - Script Generator       | 50             | 50           | 50            | 50
  * 5. Automation - Record & Play - Web App| 100            | 50           | 100           | 50
- * 6. Automation - Record & Play - Mobile | 50             | 50           | 50            | 50
+ * 6. Automation - Record & Play - Mobile | 50             | 20           | 50            | 20
  * 7. UI Testing                          | 50             | 50           | 50            | 50
  * 8. API Testing                         | 50             | 50           | 50            | 50
  * 9. API Performance Testing             | 100            | 50           | 100           | 50
@@ -201,6 +211,13 @@ export const FEATURE_CREDIT_RULES: Record<string, FeatureCreditRule> = {
     trial: { analysis: 50, export: 20 },
     paid: { analysis: 50, export: 20 },
     description: 'Record mobile touch events, gestures, and screens, generate Appium scripts. Export/download mobile test package.'
+  },
+  record_playback: {
+    featureKey: 'record_playback',
+    displayName: 'Automation - Playback',
+    trial: { analysis: 50, export: 50 },
+    paid: { analysis: 50, export: 50 },
+    description: 'Execute a recorded playback flow. A data-driven batch is charged once per playback session.'
   },
   ui_testing: {
     featureKey: 'ui_testing',

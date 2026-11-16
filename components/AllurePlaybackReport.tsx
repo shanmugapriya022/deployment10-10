@@ -430,6 +430,12 @@ export const AllurePlaybackReport: React.FC<AllurePlaybackReportProps> = ({
 
   // Download Allure Report as standalone HTML file
   const handleDownloadAllureReport = () => {
+    const escapeHtml = (value: string) => value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
     const reportDate = new Date(playbackStartTime || Date.now()).toLocaleString();
     const testName = playbackFlow?.name || 'Playback Flow';
     const statusText = playbackStatus === 'completed' ? 'PASSED' : 'FAILED';
@@ -440,16 +446,24 @@ export const AllurePlaybackReport: React.FC<AllurePlaybackReportProps> = ({
       const color = st === 'passed' ? '#97cc64' : (st === 'failed' ? '#fd5a3e' : '#aaa');
       const symbol = st === 'passed' ? '✓' : (st === 'failed' ? '✗' : '•');
       const time = stepExecutionTime[s.id] ? `${stepExecutionTime[s.id]}ms` : '350ms';
+      const stepName = s.elementName || s.locator?.primary?.value || s.action;
+      const screenshot = playbackStepScreenshots[s.id] || s.screenshot;
+      const screenshotHtml = screenshot
+        ? `<div style="margin-top:12px;"><div style="font-size:10px;font-weight:700;color:#64748b;text-transform:uppercase;margin-bottom:6px;">Screenshot evidence</div><img src="${escapeHtml(screenshot)}" alt="Screenshot for ${escapeHtml(stepName)}" style="display:block;width:auto;max-width:100%;max-height:520px;border:1px solid #cbd5e1;border-radius:6px;background:#0f172a;" /></div>`
+        : '<div style="margin-top:10px;font-size:11px;color:#94a3b8;">No screenshot was captured for this step.</div>';
       return `
-        <div style="border: 1px solid #e2e8f0; border-radius: 8px; margin-bottom: 8px; padding: 12px; background: #ffffff; display: flex; justify-content: space-between; align-items: center;">
-          <div style="display: flex; align-items: center; gap: 10px;">
-            <span style="display: inline-flex; width: 22px; height: 22px; border-radius: 50%; background: ${color}20; color: ${color}; font-weight: bold; align-items: center; justify-content: center; font-size: 13px;">${symbol}</span>
-            <div>
-              <strong style="font-size: 13px; color: #1e293b;">Step ${idx + 1}: ${s.elementName || s.locator?.primary?.value || s.action}</strong>
-              <div style="font-size: 11px; color: #64748b; font-family: monospace; margin-top: 2px;">Action: ${s.action} ${s.value ? `| Value: "${s.value}"` : ''}</div>
+        <div style="border: 1px solid #e2e8f0; border-radius: 8px; margin-bottom: 8px; padding: 12px; background: #ffffff;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="display: flex; align-items: center; gap: 10px;">
+              <span style="display: inline-flex; width: 22px; height: 22px; border-radius: 50%; background: ${color}20; color: ${color}; font-weight: bold; align-items: center; justify-content: center; font-size: 13px;">${symbol}</span>
+              <div>
+                <strong style="font-size: 13px; color: #1e293b;">Step ${idx + 1}: ${escapeHtml(stepName)}</strong>
+                <div style="font-size: 11px; color: #64748b; font-family: monospace; margin-top: 2px;">Action: ${escapeHtml(s.action)} ${s.value ? `| Value: "${escapeHtml(s.value)}"` : ''}</div>
+              </div>
             </div>
+            <span style="font-size: 11px; color: #64748b; font-family: monospace;">${time}</span>
           </div>
-          <span style="font-size: 11px; color: #64748b; font-family: monospace;">${time}</span>
+          ${screenshotHtml}
         </div>
       `;
     }).join('');
@@ -458,7 +472,7 @@ export const AllurePlaybackReport: React.FC<AllurePlaybackReportProps> = ({
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Allure Report - ${testName}</title>
+  <title>Allure Report - ${escapeHtml(testName)}</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f8fafc; color: #0f172a; line-height: 1.5; }
@@ -488,7 +502,7 @@ export const AllurePlaybackReport: React.FC<AllurePlaybackReportProps> = ({
   </div>
   <div class="container">
     <div class="card">
-      <h1 style="font-size: 22px; font-weight: 800; margin-bottom: 16px;">Test: ${testName}</h1>
+      <h1 style="font-size: 22px; font-weight: 800; margin-bottom: 16px;">Test: ${escapeHtml(testName)}</h1>
       <div class="grid">
         <div><div class="stat-label">Execution Status</div><div class="stat-val" style="color: ${statusColor};">${statusText}</div></div>
         <div><div class="stat-label">Duration</div><div class="stat-val">${durationFormatted}</div></div>
@@ -499,10 +513,10 @@ export const AllurePlaybackReport: React.FC<AllurePlaybackReportProps> = ({
     ${playbackStatus === 'failed' ? `
       <div class="error-banner">
         <div class="error-title">Failure Message & Trace</div>
-        <div class="error-msg">${playbackFailureInfo?.error || 'Playback halted unexpectedly during execution.'}</div>
+        <div class="error-msg">${escapeHtml(playbackFailureInfo?.error || 'Playback halted unexpectedly during execution.')}</div>
         <div style="margin-top: 10px; font-size: 12px; color: #7f1d1d;">
           <strong>Expected:</strong> Target step should complete and verify element state without exceptions.<br/>
-          <strong>Actual:</strong> ${playbackFailureInfo?.error || 'Step timed out or element un-interactable.'}
+          <strong>Actual:</strong> ${escapeHtml(playbackFailureInfo?.error || 'Step timed out or element un-interactable.')}
         </div>
       </div>
     ` : ''}

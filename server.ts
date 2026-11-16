@@ -10,7 +10,7 @@ import { fileURLToPath } from "url";
 import { Server as SocketIOServer } from "socket.io";
 import http from "http";
 import { WebSocketServer, WebSocket } from "ws";
-import { chromium, Browser, BrowserContext, Page, Frame, Locator } from "playwright";
+import { chromium, Browser, BrowserContext, Page, Frame, Locator, Response as PlaywrightResponse } from "playwright";
 import dns from "dns";
 import net from "net";
 import * as geminiService from "./geminiService";
@@ -560,6 +560,14 @@ interface RecordingSession {
   status?: 'INITIALIZING' | 'PERMISSION_REQUESTED' | 'AUTHENTICATION_REQUIRED' | 'RECORDING_READY' | 'RECORDING' | 'STOPPED' | 'ERROR';
 }
 
+interface PersistentPlaybackSession {
+  browser: Browser;
+  context: BrowserContext;
+  page: Page;
+  pageMap: Map<string, Page>;
+  idleTimer?: ReturnType<typeof setTimeout>;
+}
+
 const sessions = new Map<string, RecordingSession>();
 const sessionPrimaryOrigins = new Map<string, string>();
 
@@ -680,6 +688,17 @@ async function startServer() {
   const playbackOtpWaiters = new Map<string, (otp: string) => void>();
   const activePlaybackSessions = new Set<string>();
   const queuedPlaybackOtps = new Map<string, string>();
+  const persistentPlaybackSessions = new Map<string, PersistentPlaybackSession>();
+  const playbackSessionCloseRequests = new Set<string>();
+  const closePersistentPlaybackSession = async (sessionId: string) => {
+    const session = persistentPlaybackSessions.get(sessionId);
+    if (!session) return;
+    persistentPlaybackSessions.delete(sessionId);
+    if (session.idleTimer) clearTimeout(session.idleTimer);
+    await session.browser.close().catch(error => {
+      console.error(`[Playback Engine] Failed to close retained browser session ${sessionId}:`, error);
+    });
+  };
   const app = express();
   app.use(compression());
   app.use(express.json({ limit: '100mb' }));
@@ -6833,6 +6852,58 @@ async function startServer() {
       } catch (bErr: any) {}
     }
 
+    const recordedLocators = [
+      step.structuredLocator,
+      step.locator?.structuredLocator,
+      step.locator?.primary,
+      step.locator?.primary?.structuredLocator,
+      ...(Array.isArray(step.locator?.alternatives) ? step.locator.alternatives : []),
+      ...(Array.isArray(step.locator?.fallbacks) ? step.locator.fallbacks : [])
+    ];
+    const recordedTargetName = [
+      step.elementName,
+      step.text,
+      step.value,
+      step.placeholder,
+      step.selector,
+      ...recordedLocators.flatMap((candidate: any) => [
+        candidate?.name,
+        candidate?.value,
+        candidate?.text,
+        candidate?.accessibleName,
+        candidate?.playwright
+      ])
+    ].filter((part): part is string => typeof part === 'string').join(' ');
+    if (['click', 'dblclick'].includes(action) && /yes[\s,]*proceed/i.test(recordedTargetName)) {
+      const proceedName = /yes[\s,]*proceed/i;
+      builtCandidates.unshift(
+        {
+          loc: targetContext.getByRole('button', { name: proceedName }),
+          desc: 'getByRole("button", { name: /yes proceed/i })',
+          targetIndex: null,
+          name: 'yes-proceed-button',
+          cand: recordedTargetName,
+          nameBearing: true
+        },
+        {
+          loc: targetContext.locator('button').filter({ hasText: proceedName }),
+          desc: 'button:has-text(/yes proceed/i)',
+          targetIndex: null,
+          name: 'yes-proceed-button-text',
+          cand: recordedTargetName,
+          nameBearing: true
+        },
+        {
+          loc: targetContext.getByText(proceedName),
+          desc: 'getByText(/yes proceed/i)',
+          targetIndex: null,
+          name: 'yes-proceed-text',
+          cand: recordedTargetName,
+          nameBearing: true
+        }
+      );
+    }
+
     // If step.elementName exists and is not already covered, add smart semantic helpers
     if (step.elementName) {
       const elN = step.elementName.trim();
@@ -7364,6 +7435,14 @@ async function startServer() {
     return res.status(410).json({ error: 'Playback session has ended. Replay the flow to enter a fresh OTP.' });
   });
 
+  app.post('/api/run-playback/session/close', async (req, res) => {
+    const sessionId = String(req.body?.sessionId || '');
+    if (!sessionId) return res.status(400).json({ error: 'Playback session ID is required.' });
+    if (activePlaybackSessions.has(sessionId)) playbackSessionCloseRequests.add(sessionId);
+    await closePersistentPlaybackSession(sessionId);
+    res.json({ success: true });
+  });
+
   app.post("/api/run-playback", async (req, res) => {
     const { 
       steps, 
@@ -7381,6 +7460,9 @@ async function startServer() {
       syntheticUsers
     } = req.body;
     const playbackSessionId = String(req.body?.playbackSessionId || '');
+    const retainBrowserSession = req.body?.retainBrowserSession === true && playbackSessionId.length > 0;
+    const startStepIndex = Math.max(0, Math.min(steps?.length || 0, Number(req.body?.startStepIndex) || 0));
+    const repeatFromStepIndex = Math.max(0, Math.min(steps?.length || 0, Number(req.body?.repeatFromStepIndex) || 0));
     const otpTimeoutMs = Math.max(30000, Math.min(600000, Number(req.body?.otpTimeoutMs) || 300000));
     const manualOtpInBrowser = req.body?.otpEntryMode === 'live_browser';
     if (!steps || !Array.isArray(steps) || steps.length === 0) {
@@ -7421,6 +7503,17 @@ async function startServer() {
 
     let browser: Browser | null = null;
     let context: BrowserContext | null = null;
+    let persistentPage: Page | null = null;
+    let persistentPageMap: Map<string, Page> | null = null;
+    let playbackPageListener: ((newPage: Page) => void) | null = null;
+    let playbackResponseListeners: Array<{ page: Page; listener: (response: PlaywrightResponse) => void }> = [];
+    let retainSessionAfterRequest = retainBrowserSession;
+    const existingPersistentSession = playbackSessionId ? persistentPlaybackSessions.get(playbackSessionId) : undefined;
+    const reuseBrowserSession = Boolean(existingPersistentSession?.browser.isConnected());
+    if (existingPersistentSession?.idleTimer) clearTimeout(existingPersistentSession.idleTimer);
+    if (existingPersistentSession && !reuseBrowserSession) {
+      await closePersistentPlaybackSession(playbackSessionId);
+    }
 
     try {
       let width = 1280;
@@ -7431,15 +7524,21 @@ async function startServer() {
         height = parseInt(parts[1], 10) || 800;
       }
 
-      try {
-        browser = await launchPlaywrightBrowser({ headless: manualOtpInBrowser ? false : isHeadless !== false });
-      } catch (browserErr: any) {
-        console.error("[Playback Engine] Playwright launch error:", browserErr);
-        if (isStreaming) {
-          sendEvent('error', { error: `Failed to launch browser engine: ${browserErr.message || String(browserErr)}` });
-          return res.end();
-        } else {
-          return res.status(500).json({ success: false, error: `Failed to launch browser engine: ${browserErr.message || String(browserErr)}` });
+      if (reuseBrowserSession && existingPersistentSession) {
+        browser = existingPersistentSession.browser;
+        context = existingPersistentSession.context;
+        persistentPage = existingPersistentSession.page;
+      } else {
+        try {
+          browser = await launchPlaywrightBrowser({ headless: manualOtpInBrowser ? false : isHeadless !== false });
+        } catch (browserErr: any) {
+          console.error("[Playback Engine] Playwright launch error:", browserErr);
+          if (isStreaming) {
+            sendEvent('error', { error: `Failed to launch browser engine: ${browserErr.message || String(browserErr)}` });
+            return res.end();
+          } else {
+            return res.status(500).json({ success: false, error: `Failed to launch browser engine: ${browserErr.message || String(browserErr)}` });
+          }
         }
       }
 
@@ -7450,23 +7549,36 @@ async function startServer() {
         ? 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Mobile/15E148 Safari/604.1'
         : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 
-      context = await browser.newContext({
-        viewport: { width, height },
-        deviceScaleFactor: isMobile ? 2 : 1,
-        isMobile,
-        hasTouch: isMobile,
-        userAgent,
-        ignoreHTTPSErrors: true
-      });
+      if (!context) {
+        if (!browser) throw new Error('Playback browser failed to initialize.');
+        context = await browser.newContext({
+          viewport: { width, height },
+          deviceScaleFactor: isMobile ? 2 : 1,
+          isMobile,
+          hasTouch: isMobile,
+          userAgent,
+          ignoreHTTPSErrors: true
+        });
+      }
 
       // Track pages by pageId and maintain mapping
-      const pageMap = new Map<string, Page>();
+      const pageMap = reuseBrowserSession && existingPersistentSession
+        ? existingPersistentSession.pageMap
+        : new Map<string, Page>();
+      persistentPageMap = pageMap;
       const pageToId = new Map<Page, string>();
+      pageMap.forEach((mappedPage, mappedId) => {
+        if (!mappedPage.isClosed()) pageToId.set(mappedPage, mappedId);
+      });
       let autoTabId = 1;
 
-      const initialPage = await context.newPage();
+      const currentPages = context.pages().filter(existingPage => !existingPage.isClosed());
+      const initialPage = persistentPage && !persistentPage.isClosed()
+        ? persistentPage
+        : currentPages[0] || await context.newPage();
       initialPage.setDefaultTimeout(12000);
       let page: Page = initialPage;
+      persistentPage = page;
 
       const firstStep = steps[0] || {};
       const primaryPageId = String(firstStep.pageId || (firstStep.tabId !== undefined && firstStep.tabId !== null ? `tab-${firstStep.tabId}` : 'tab-1'));
@@ -7475,7 +7587,7 @@ async function startServer() {
 
       const redirectLog: string[] = [];
       const setupPageListeners = (p: Page) => {
-        p.on('response', (response) => {
+        const listener = (response: PlaywrightResponse) => {
           const status = response.status();
           if (status >= 300 && status < 400) {
             const loc = response.headers()['location'];
@@ -7484,11 +7596,13 @@ async function startServer() {
               console.log(`[Playback Engine] Redirect: ${response.url()} -> ${loc}`);
             }
           }
-        });
+        };
+        p.on('response', listener);
+        playbackResponseListeners.push({ page: p, listener });
       };
       setupPageListeners(initialPage);
 
-      context.on('page', (newPage) => {
+      playbackPageListener = (newPage) => {
         setupPageListeners(newPage);
         if (!pageToId.has(newPage)) {
           const unmappedStep = steps.find(s => {
@@ -7502,7 +7616,8 @@ async function startServer() {
           pageToId.set(newPage, assignedId);
           console.log(`[Playback Engine] Context opened new tab mapped to pageId "${assignedId}", url: ${newPage.url()}`);
         }
-      });
+      };
+      context.on('page', playbackPageListener);
 
       const results: any[] = [];
 
@@ -7556,9 +7671,13 @@ async function startServer() {
         return null;
       };
 
-      const rawInitial = initialUrl || appUrl || steps[0]?.url || steps[0]?.value;
+      const rawInitial = startStepIndex > 0
+        ? initialUrl
+        : initialUrl || appUrl || steps[0]?.url || steps[0]?.value;
       const unwrappedInitial = unwrapProxyUrl(rawInitial);
-      const requestedInitialUrl = resolveCandidateNavUrl(steps[0] || {}, unwrappedInitial) || resolveFullStepUrl(unwrappedInitial || rawInitial) || sanitizeUrl(unwrappedInitial || rawInitial);
+      const requestedInitialUrl = (startStepIndex > 0 ? null : resolveCandidateNavUrl(steps[0] || {}, unwrappedInitial))
+        || resolveFullStepUrl(unwrappedInitial || rawInitial)
+        || sanitizeUrl(unwrappedInitial || rawInitial);
       if (!requestedInitialUrl || !/^https?:\/\//i.test(requestedInitialUrl)) {
         throw new Error('Playback requires a valid recorded live target URL; no fallback target will be used.');
       }
@@ -7635,30 +7754,47 @@ async function startServer() {
       };
 
       // Only pre-navigate if the flow does not already have an explicit initial navigate step
-      const hasInitialNavigateStep = steps.length > 0 && steps[0]?.action === 'navigate';
+      const hasInitialNavigateStep = startStepIndex === 0 && steps.length > 0 && steps[0]?.action === 'navigate';
       if (!hasInitialNavigateStep) {
         try {
           currentUrl = await safeNavigatePage(currentUrl, initialPage);
         } catch (initNavErr: any) {
           console.error(`[Playback Engine] Initial navigation to "${currentUrl}" failed:`, initNavErr);
           const failErr = initNavErr?.message || `Failed to navigate to initial URL: ${currentUrl}`;
+          const failedStepIndex = Math.min(startStepIndex, steps.length - 1);
+          const failedStep = steps[failedStepIndex];
+          for (let j = 0; j < failedStepIndex; j++) {
+            const completedLoginStep = {
+              stepId: steps[j]?.id || `step-${j}`,
+              stepIndex: j,
+              action: steps[j]?.action,
+              status: 'passed',
+              duration: 0,
+              resultingUrl: initialPage.url() || currentUrl,
+              pageTitle: '',
+              screenshot: '',
+              redirectChain: []
+            };
+            results.push(completedLoginStep);
+            sendEvent('step_result', { result: completedLoginStep });
+          }
           const failResult = {
-            stepId: steps[0]?.id || 'step-init',
-            stepIndex: 0,
-            action: steps[0]?.action || 'navigate',
+            stepId: failedStep?.id || 'step-init',
+            stepIndex: failedStepIndex,
+            action: failedStep?.action || 'navigate',
             status: 'failed',
             duration: 0,
             error: failErr,
             resultingUrl: initialPage.url() || currentUrl,
             pageTitle: '',
-            screenshot: getFallbackScreenshotSvg(steps[0]?.action || 'navigate', currentUrl),
+            screenshot: getFallbackScreenshotSvg(failedStep?.action || 'navigate', currentUrl),
             redirectChain: []
           };
           results.push(failResult);
           sendEvent('step_result', { result: failResult });
 
           // Mark remaining steps as skipped
-          for (let j = 1; j < steps.length; j++) {
+          for (let j = failedStepIndex + 1; j < steps.length; j++) {
             const skippedStep = steps[j];
             const skippedRes = {
               stepId: skippedStep.id,
@@ -7678,18 +7814,18 @@ async function startServer() {
 
           // Return immediately with failed state
           const failedCount = 1;
-          const skippedCount = steps.length - 1;
-          await browser.close().catch(() => {});
+          const skippedCount = steps.length - failedStepIndex - 1;
+          const passedCount = failedStepIndex;
           if (isStreaming) {
             sendEvent('done', {
               success: false,
               status: 'FAILED',
-              passedCount: 0,
+              passedCount,
               failedCount,
               skippedCount,
               count: results.length,
-              failedAtStep: 1,
-              failedStepName: steps[0]?.elementName || steps[0]?.action,
+              failedAtStep: failedStepIndex + 1,
+              failedStepName: failedStep?.elementName || failedStep?.action,
               error: failErr
             });
             res.end();
@@ -7697,11 +7833,11 @@ async function startServer() {
             res.json({
               success: false,
               status: 'FAILED',
-              passedCount: 0,
+              passedCount,
               failedCount,
               skippedCount,
-              failedAtStep: 1,
-              failedStepName: steps[0]?.elementName || steps[0]?.action,
+              failedAtStep: failedStepIndex + 1,
+              failedStepName: failedStep?.elementName || failedStep?.action,
               error: failErr,
               results
             });
@@ -7715,10 +7851,32 @@ async function startServer() {
         initialUrl: page.url() || currentUrl,
         pageTitle: await page.title().catch(() => '')
       });
+      if (repeatFromStepIndex === steps.length) {
+        sendEvent('repeat_boundary', { stepIndex: repeatFromStepIndex, url: page.url() || currentUrl });
+      }
 
       let manualOtpSkipThrough = -1;
       for (let i = 0; i < steps.length; i++) {
         const step = steps[i];
+        if (i === repeatFromStepIndex) {
+          sendEvent('repeat_boundary', { stepIndex: i, url: page.url() || currentUrl });
+        }
+        if (i < startStepIndex) {
+          const previouslyCompletedStep = {
+            stepId: step.id,
+            stepIndex: i,
+            action: step.action,
+            status: 'passed',
+            duration: 0,
+            resultingUrl: page.url() || currentUrl,
+            pageTitle: await page.title().catch(() => ''),
+            screenshot: '',
+            redirectChain: []
+          };
+          results.push(previouslyCompletedStep);
+          sendEvent('step_result', { result: previouslyCompletedStep });
+          continue;
+        }
         const stepOtpLabel = `${step.locator?.primary?.value || ''} ${step.elementName || ''} ${step.placeholder || ''} ${step.selector || ''}`;
         const stepLooksLikeOtp = /otp|totp|one.?time.?code|verification code|authenticator/i.test(stepOtpLabel);
         const stepActionName = String(step.action || '').toLowerCase();
@@ -7871,6 +8029,7 @@ async function startServer() {
           }
 
           page = targetPage;
+          persistentPage = page;
           const urlBeforeAction = targetPage.url();
 
           // OTP checkpoints are driven by recorded step metadata, so navigation
@@ -7883,6 +8042,9 @@ async function startServer() {
               otpAttempt++;
               const otpScreenshot = await targetPage.screenshot({ type: 'jpeg', quality: 55, fullPage: false, timeout: 2500 })
                 .then(buf => `data:image/jpeg;base64,${buf.toString('base64')}`).catch(() => '');
+              const otpSelector = 'input[autocomplete="one-time-code"], input[aria-label*="otp" i], input[placeholder*="otp" i], input[name*="otp" i], input[id*="otp" i], input[maxlength="1"], input[inputmode="numeric"]';
+              const otpInputs = targetPage.locator(otpSelector);
+              const accessibleOtpInputs = targetPage.getByRole('textbox', { name: /otp|totp|verification code|one-time-code/i });
               let otp: string;
               const queuedOtp = queuedPlaybackOtps.get(playbackSessionId);
               if (queuedOtp !== undefined) {
@@ -7897,20 +8059,60 @@ async function startServer() {
                 const timeoutPromise = new Promise<never>((_, reject) => {
                   timeoutId = setTimeout(() => reject(new Error(`Timed out waiting for manual OTP entry (${Math.round(otpTimeoutMs / 60000)} minutes).`)), otpTimeoutMs);
                 });
-                try { otp = await Promise.race([otpPromise, timeoutPromise]); }
-                finally { clearTimeout(timeoutId!); playbackOtpWaiters.delete(playbackSessionId); }
+                const visibleOtpFieldsRemain = async () => {
+                  const selectorFieldsVisible = await otpInputs.evaluateAll((els: Element[]) => els.some(el => {
+                    const input = el as HTMLInputElement;
+                    const style = window.getComputedStyle(input);
+                    return !input.disabled && style.display !== 'none' && style.visibility !== 'hidden' && input.getClientRects().length > 0;
+                  })).catch(() => false);
+                  if (selectorFieldsVisible) return true;
+                  return await accessibleOtpInputs.evaluateAll((els: Element[]) => els.some(el => {
+                    const input = el as HTMLInputElement;
+                    const style = window.getComputedStyle(input);
+                    return !input.disabled && style.display !== 'none' && style.visibility !== 'hidden' && input.getClientRects().length > 0;
+                  })).catch(() => false);
+                };
+                let stopAutoResume = false;
+                const autoResumeAfterLiveOtp = async (): Promise<string> => {
+                  const waitStartedAt = Date.now();
+                  let sawOtpField = false;
+                  let otpClearedAt: number | null = null;
+                  while (!stopAutoResume && Date.now() - waitStartedAt < otpTimeoutMs) {
+                    const hasVisibleOtpField = await visibleOtpFieldsRemain();
+                    if (hasVisibleOtpField) {
+                      sawOtpField = true;
+                      otpClearedAt = null;
+                    }
+                    const currentOtpUrl = targetPage.url();
+                    const leftOtpPage = currentOtpUrl !== urlBeforeAction && !/\/(?:totp|otp|mfa|verify)(?:[/?#]|$)/i.test(currentOtpUrl);
+                    if (!hasVisibleOtpField && (sawOtpField || leftOtpPage)) {
+                      if (otpClearedAt === null) otpClearedAt = Date.now();
+                      if (Date.now() - otpClearedAt >= 1000) return '\u0000CONTINUE';
+                    } else {
+                      otpClearedAt = null;
+                    }
+                    await targetPage.waitForTimeout(300);
+                  }
+                  if (stopAutoResume) return '\u0000CANCEL';
+                  throw new Error(`Timed out waiting for OTP verification to complete (${Math.round(otpTimeoutMs / 60000)} minutes).`);
+                };
+                const otpWaiters: Array<Promise<string>> = [otpPromise, timeoutPromise];
+                if (manualOtpInBrowser) otpWaiters.push(autoResumeAfterLiveOtp());
+                try { otp = await Promise.race(otpWaiters); }
+                finally {
+                  stopAutoResume = true;
+                  clearTimeout(timeoutId!);
+                  playbackOtpWaiters.delete(playbackSessionId);
+                }
               }
               if (otp === '\u0000CANCEL') throw new Error('Playback stopped while waiting for OTP.');
 
-              const otpSelector = 'input[autocomplete="one-time-code"], input[aria-label*="otp" i], input[placeholder*="otp" i], input[name*="otp" i], input[id*="otp" i], input[maxlength="1"], input[inputmode="numeric"]';
-              const otpInputs = targetPage.locator(otpSelector);
               const candidateCount = await otpInputs.count().catch(() => 0);
               const visibleIndexes = candidateCount > 0 ? await otpInputs.evaluateAll((els: Element[]) => els.map((el, index) => {
                 const input = el as HTMLInputElement;
                 const style = window.getComputedStyle(input);
                 return !input.disabled && style.display !== 'none' && style.visibility !== 'hidden' && input.getClientRects().length > 0 ? index : -1;
               }).filter(index => index >= 0)) : [];
-              const accessibleOtpInputs = targetPage.getByRole('textbox', { name: /otp|totp|verification code|one-time-code/i });
               const accessibleCount = await accessibleOtpInputs.count().catch(() => 0);
               const visibleAccessibleIndexes = accessibleCount > 0
                 ? await accessibleOtpInputs.evaluateAll((els: Element[]) => els.map((el, index) => {
@@ -8020,6 +8222,7 @@ async function startServer() {
               if (!remainingOtpFields && !remainingAccessibleOtpFields) otpAccepted = true;
               else manualOtpStepFilled = false;
             }
+            if (otpAccepted) sendEvent('otp_resumed', { stepIndex: i, mode: manualOtpInBrowser ? 'live_browser' : 'popup' });
           }
 
           console.log(`[Playback Engine] Step ${i + 1}/${steps.length}: [${action.toUpperCase()}] Selector: "${selector}" Value: "${value}" PageId: "${stepPageId || 'default'}" Current URL: "${urlBeforeAction}"`);
@@ -8039,6 +8242,7 @@ async function startServer() {
               await safeNavigatePage(tabNav, openedPage);
             }
             page = openedPage;
+            persistentPage = page;
             currentUrl = openedPage.url() || tabNav;
 
             const passedResult = {
@@ -8059,7 +8263,10 @@ async function startServer() {
             await targetPage.close().catch(() => {});
             if (stepPageId) pageMap.delete(stepPageId);
             const remaining = context.pages().filter(p => !p.isClosed());
-            if (remaining.length > 0) page = remaining[0];
+            if (remaining.length > 0) {
+              page = remaining[0];
+              persistentPage = page;
+            }
             const passedResult = {
               stepId: step.id,
               stepIndex: i,
@@ -8077,6 +8284,7 @@ async function startServer() {
           } else if (action === 'switch_tab') {
             await targetPage.bringToFront().catch(() => {});
             page = targetPage;
+            persistentPage = page;
             currentUrl = targetPage.url();
             const passedResult = {
               stepId: step.id,
@@ -8110,6 +8318,7 @@ async function startServer() {
                 console.log(`[Playback Engine] Step ${i + 1}: Switching to matching context page <${otherMatch.url()}>`);
                 targetPage = otherMatch;
                 page = otherMatch;
+                persistentPage = page;
                 if (stepPageId) pageMap.set(stepPageId, otherMatch);
               } else {
                 try {
@@ -8378,7 +8587,6 @@ async function startServer() {
         } catch (e) {}
       }
 
-      await browser.close().catch(() => {});
       console.log(`[Playback Engine] Playback finished. Status: ${flowStatus}. Passed: ${passedCount}, Failed: ${failedCount}, Skipped: ${skippedCount}, Total: ${steps.length}`);
 
       if (isStreaming) {
@@ -8408,7 +8616,7 @@ async function startServer() {
         });
       }
     } catch (playbackError: any) {
-      if (browser) await browser.close().catch(() => {});
+      retainSessionAfterRequest = false;
       console.error("[Playback Engine] Execution exception:", playbackError);
       if (isStreaming) {
         sendEvent('error', { error: playbackError.message || "Playback engine encountered a server error." });
@@ -8420,12 +8628,47 @@ async function startServer() {
         });
       }
     } finally {
+      if (context && playbackPageListener) context.off('page', playbackPageListener);
+      playbackResponseListeners.forEach(({ page: listenedPage, listener }) => {
+        listenedPage.off('response', listener);
+      });
+
       if (playbackSessionId) {
         activePlaybackSessions.delete(playbackSessionId);
         queuedPlaybackOtps.delete(playbackSessionId);
         playbackOtpWaiters.delete(playbackSessionId);
+        const closeRequested = playbackSessionCloseRequests.delete(playbackSessionId);
+        let sessionRetained = false;
+        if (
+          retainSessionAfterRequest &&
+          !closeRequested &&
+          browser &&
+          context &&
+          persistentPage &&
+          browser.isConnected()
+        ) {
+          persistentPageMap?.forEach((mappedPage, mappedId) => {
+            if (mappedPage.isClosed()) persistentPageMap?.delete(mappedId);
+          });
+          const retainedSession: PersistentPlaybackSession = {
+            browser,
+            context,
+            page: persistentPage,
+            pageMap: persistentPageMap || new Map<string, Page>()
+          };
+          persistentPlaybackSessions.set(playbackSessionId, retainedSession);
+          retainedSession.idleTimer = setTimeout(() => {
+            if (persistentPlaybackSessions.get(playbackSessionId) === retainedSession) {
+              void closePersistentPlaybackSession(playbackSessionId);
+            }
+          }, 10 * 60 * 1000);
+          sessionRetained = true;
+          console.log(`[Playback Engine] Retained browser session for next data row: ${playbackSessionId}`);
+        }
+
+        if (!sessionRetained) await closePersistentPlaybackSession(playbackSessionId);
       }
-      if (browser) {
+      if (browser && (!playbackSessionId || !persistentPlaybackSessions.has(playbackSessionId))) {
         await browser.close().catch(() => {});
       }
     }
@@ -10637,7 +10880,14 @@ async function startServer() {
   });
 
   // Generic Gemini Function Calling Proxy (With AI Response Caching)
-function getFeatureDisplayNameServer(functionName: string): string {
+function getFeatureDisplayNameServer(functionName: string, args?: any[]): string {
+  if (functionName === 'generateFlowAutomationProject') {
+    const flow = args?.[0];
+    return flow?.platform === 'mobile' || args?.[1] === 'Appium'
+      ? 'Automation - Record and play - Mobile app'
+      : 'Automation - Record and play - Web app';
+  }
+
   switch (functionName) {
     case 'generateUserStoriesFromDoc':
     case 'generateUserStories':
@@ -10663,7 +10913,6 @@ function getFeatureDisplayNameServer(functionName: string): string {
     case 'mobileRecordAndPlay':
       return 'Automation - Record and play - Mobile app';
     case 'webRecordAndPlay':
-    case 'generateFlowAutomationProject':
     case 'suggestFlowLocatorHealing':
       return 'Automation - Record and play - Web app';
     case 'performUITesting':
@@ -10746,6 +10995,9 @@ function calculateCreditsConsumedServer(
   // coverage repair, but the user is charged 50 credits once for the completed POM suite.
   if (f === 'automation script generation') return 50;
 
+  // Recorded playback runs are charged once per session, including data-driven batches.
+  if (f.includes('playback')) return 50;
+
   // 1. AI User Stories Generation: Trial (5 / 20), Paid (5 / 10)
   if (f.includes('user_stories') || f.includes('user_story') || f.includes('user stor') || f.includes('story') || f.includes('stories')) {
     if (actionType === 'export') {
@@ -10778,9 +11030,9 @@ function calculateCreditsConsumedServer(
     return planType === 'Paid' ? 50 : 100;
   }
 
-  // 6. Automation - Record & Play - Mobile App: Trial (50 / 50), Paid (50 / 50)
+  // 6. Automation - Record & Play - Mobile App: Trial and Paid (50 / 20)
   if (f.includes('mobile') || f.includes('appium')) {
-    if (actionType === 'export') return 50;
+    if (actionType === 'export') return 20;
     return 50;
   }
 
@@ -12804,7 +13056,7 @@ async function recordTokenLogServer(params: {
         return res.status(404).json({ error: `Function ${functionName} not found or is not a function` });
       }
 
-      const featureName = getFeatureDisplayNameServer(functionName);
+      const featureName = getFeatureDisplayNameServer(functionName, args);
       const projectTarget = userContext?.projectId || userContext?.project || '27/07';
       const clientPlanHint = userContext?.planType || userContext?.clientPlanHint;
 
@@ -13659,6 +13911,7 @@ async function recordTokenLogServer(params: {
 
   interface ActiveMobileSession {
     email: string;
+    sessionId: string;
     deviceId: string;
     appId?: string;
     packageName?: string;
@@ -14253,6 +14506,18 @@ pause
   app.post(["/api/device-agent/perform-action", "/api/mobile/agent/perform-action"], (req, res) => {
     const { email, action, params } = req.body;
     const userEmail = (email || "sowbarnya@qaoncloud.com").toLowerCase();
+    const activeSession = activeMobileSessions.get(userEmail);
+    if (
+      params?.sessionId &&
+      activeSession?.sessionId &&
+      params.sessionId !== activeSession.sessionId
+    ) {
+      return res.status(409).json({
+        success: false,
+        error: "Rejected command for another recording session."
+      });
+    }
+
     const targetAgent = getMobileAgent(userEmail);
     const queueEmail = targetAgent?.email || userEmail;
 
@@ -14424,6 +14689,7 @@ pause
       success: true,
       registered: true,
       recording: activeSession ? {
+        sessionId: activeSession.sessionId,
         deviceId: activeSession.deviceId,
         appPackage: activeSession.packageName,
         status: activeSession.status === 'RUNNING' ? 'Recording' : 'Starting'
@@ -14708,16 +14974,18 @@ pause
   });
 
   app.post("/api/mobile/app/launch", (req, res) => {
-    const { email, deviceId, packageName, launchActivity } = req.body;
+    const { email, deviceId, packageName, launchActivity, sessionId } = req.body;
     const userEmail = (email || "shanmugapriya@qaoncloud.com").toLowerCase();
     const agent = getMobileAgent(userEmail);
 
     const targetPkg = packageName || 'com.machaxi.app';
     const targetActivity = launchActivity || '.MainActivity';
     const targetDevice = deviceId || 'emulator-5554';
+    const activeSessionId = sessionId || `mob-${Date.now().toString(36)}-${Math.random().toString(36).substring(7)}`;
 
     const session: ActiveMobileSession = {
       email: userEmail,
+      sessionId: activeSessionId,
       deviceId: targetDevice,
       packageName: targetPkg,
       launchActivity: targetActivity,
@@ -14736,14 +15004,17 @@ pause
       params: { 
         packageName: targetPkg, 
         launchActivity: targetActivity, 
-        deviceId: targetDevice 
+        deviceId: targetDevice,
+        sessionId: activeSessionId
       },
       timestamp: Date.now()
     };
 
     // Queue action in pendingActionsMap for agent polling
     const queueEmail = agent?.email || userEmail;
-    const userActions = pendingActionsMap.get(queueEmail) || [];
+    const userActions = (pendingActionsMap.get(queueEmail) || [])
+      .filter(action => action.params?.sessionId === activeSessionId);
+    pendingActionsMap.set(queueEmail, userActions);
     userActions.push(launchAction);
     pendingActionsMap.set(queueEmail, userActions);
 

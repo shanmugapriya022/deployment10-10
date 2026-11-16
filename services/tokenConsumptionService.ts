@@ -613,6 +613,8 @@ export const FEATURE_CREDIT_COSTS: Record<string, number> = {
   'Automation - Record and play - Mobile app': 50,
   'Automation - Record and play - Mobile App': 50,
   'Record & Play - Mobile App': 50,
+  'Automation - Playback': 50,
+  record_playback: 50,
   'Automation - Record and play': 50,
   'Automation - Record and play - Web app and Mobile app': 50,
 

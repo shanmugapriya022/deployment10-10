@@ -162,6 +162,41 @@ interface RecordAndPlayProps {
   initialPlatform?: 'web' | 'mobile';
 }
 
+interface PlaybackDataRun {
+  id: string;
+  flow: RecordedFlow;
+  dataset: DataDrivenTestData;
+  rowIndex: number;
+  passedRows: number;
+  failedRows: number;
+  repeatFromStepIndex: number;
+  reports: PlaybackDataRowReport[];
+  batchStartedAt: number;
+}
+
+interface PlaybackDataRowReport {
+  rowIndex: number;
+  flow: RecordedFlow;
+  stepExecutionStatus: Record<string, 'pending' | 'running' | 'passed' | 'failed' | 'skipped'>;
+  stepExecutionTime: Record<string, number>;
+  screenshots: Record<string, string>;
+  status: 'completed' | 'failed';
+  failureInfo: { stepIndex: number; stepName: string; error: string } | null;
+  startTime: number;
+  endTime: number;
+}
+
+interface PlaybackDataBatchReport {
+  flow: RecordedFlow;
+  stepExecutionStatus: Record<string, 'pending' | 'running' | 'passed' | 'failed' | 'skipped'>;
+  stepExecutionTime: Record<string, number>;
+  screenshots: Record<string, string>;
+  status: 'completed' | 'failed';
+  failureInfo: { stepIndex: number; stepName: string; error: string } | null;
+  startTime: number;
+  endTime: number;
+}
+
 export function unwrapProxyUrl(rawUrl: string): string {
   if (!rawUrl || typeof rawUrl !== 'string') return '';
   let url = rawUrl.trim();
@@ -554,6 +589,172 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
     toast.info(`Switched to sheet "${newSheet}" (${sheetData.rows.length} rows)`);
   };
 
+  const handlePlaybackDatasetUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const lowerName = file.name.toLowerCase();
+    if (!['.xlsx', '.xls', '.csv', '.json'].some(ext => lowerName.endsWith(ext))) {
+      toast.error('Upload an Excel (.xlsx, .xls), CSV (.csv), or JSON (.json) test data file.');
+      e.target.value = '';
+      return;
+    }
+
+    setIsParsingPlaybackDataset(true);
+    try {
+      let dataset: DataDrivenTestData;
+      if (lowerName.endsWith('.json')) {
+        const text = await file.text();
+        const parsed = parseJsonDataset(text);
+        dataset = {
+          fileName: file.name,
+          fileSize: file.size,
+          sheetNames: parsed.sheetNames,
+          activeSheet: parsed.activeSheet,
+          headers: parsed.headers,
+          rows: parsed.rows,
+          allSheetsData: parsed.allSheetsData,
+          rawJsonText: parsed.rawJsonText || text,
+          fileType: 'json'
+        };
+      } else if (lowerName.endsWith('.csv')) {
+        const rawRows = parseCsvRows(await file.text());
+        if (rawRows.length < 2) throw new Error('The dataset must contain a header row and at least one test data row.');
+        const headers = rawRows[0].map((header, index) => String(header || `Column_${index + 1}`).trim());
+        const rows = rowsToJson(rawRows);
+        dataset = {
+          fileName: file.name,
+          fileSize: file.size,
+          sheetNames: ['CSV Data'],
+          activeSheet: 'CSV Data',
+          headers,
+          rows,
+          allSheetsData: { 'CSV Data': { headers, rows } },
+          fileType: 'csv'
+        };
+      } else {
+        const workbook = await loadXlsxWorkbook(await file.arrayBuffer());
+        const sheetNames = workbook.worksheets.map(worksheet => worksheet.name);
+        if (sheetNames.length === 0) throw new Error('The Excel workbook does not contain any worksheets.');
+        const allSheetsData: NonNullable<DataDrivenTestData['allSheetsData']> = {};
+        for (const sheetName of sheetNames) {
+          const worksheet = workbook.getWorksheet(sheetName);
+          const rawRows = worksheet ? worksheetToRows(worksheet) : [];
+          if (rawRows.length >= 2) {
+            const headers = rawRows[0].map((header, index) => String(header || `Column_${index + 1}`).trim());
+            allSheetsData[sheetName] = { headers, rows: rowsToJson(rawRows) };
+          } else {
+            allSheetsData[sheetName] = { headers: [], rows: [] };
+          }
+        }
+        const activeSheet = sheetNames.find(name => allSheetsData[name]?.rows.length > 0) || sheetNames[0];
+        const activeData = allSheetsData[activeSheet];
+        dataset = {
+          fileName: file.name,
+          fileSize: file.size,
+          sheetNames,
+          activeSheet,
+          headers: activeData.headers,
+          rows: activeData.rows,
+          allSheetsData,
+          fileType: 'excel'
+        };
+      }
+
+      if (dataset.headers.length === 0 || dataset.rows.length === 0) {
+        throw new Error('The selected dataset has no usable header row or test data rows.');
+      }
+      setPlaybackDataset(dataset);
+      setPlaybackDataRunProgress(null);
+      toast.success(`Loaded ${dataset.rows.length} playback data rows from ${file.name}`);
+    } catch (error: any) {
+      console.error('[RecordAndPlay] Failed to load playback dataset:', error);
+      toast.error(error?.message || 'Failed to read the playback test data file.');
+    } finally {
+      setIsParsingPlaybackDataset(false);
+      e.target.value = '';
+    }
+  };
+
+  const applyPlaybackDatasetRow = (flow: RecordedFlow, row: Record<string, any>) => {
+    const normalizeKey = (key: string) => key.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const rowValues = new Map<string, string>();
+    Object.entries(row).forEach(([key, value]) => {
+      if (value !== null && value !== undefined) {
+        rowValues.set(normalizeKey(key), value instanceof Date ? value.toISOString() : String(value));
+      }
+    });
+
+    let replacedSteps = 0;
+    let firstReplacedStepIndex = -1;
+    let authenticationFlowDetected = false;
+    let authenticationSubmitPending = false;
+    let lastAuthenticationSubmitIndex = -1;
+    const authenticationFieldPattern = /user(?:name)?|e-?mail|password|passcode|otp|totp|verification code|one.?time.?code/i;
+    const authenticationSubmitPattern = /login|sign.?in|submit|verify|continue|proceed|confirm/i;
+    const steps = flow.steps.map((step, index) => {
+      const stepLabel = [
+        step.elementName,
+        step.placeholder,
+        step.locator?.primary?.value
+      ].filter((value): value is string => typeof value === 'string').join(' ');
+      if (authenticationFieldPattern.test(stepLabel)) {
+        authenticationFlowDetected = true;
+        authenticationSubmitPending = true;
+      }
+      if (
+        authenticationFlowDetected &&
+        authenticationSubmitPending &&
+        ['click', 'submit', 'press'].includes(step.action) &&
+        authenticationSubmitPattern.test(stepLabel)
+      ) {
+        lastAuthenticationSubmitIndex = index;
+        authenticationSubmitPending = false;
+      }
+
+      if (!['fill', 'type', 'select', 'selectOption'].includes(step.action) || typeof step.value !== 'string') return step;
+
+      let value = step.value;
+      let stepWasReplaced = false;
+      value = value.replace(/\{\{\s*([^{}]+?)\s*\}\}|\$\{\s*([^{}]+?)\s*\}/g, (match, braceName: string | undefined, dollarName: string | undefined) => {
+        const dataValue = rowValues.get(normalizeKey(braceName || dollarName || ''));
+        if (dataValue === undefined) return match;
+        stepWasReplaced = true;
+        return dataValue;
+      });
+
+      if (!stepWasReplaced) {
+        const primary = step.locator?.primary as any;
+        const structured = step.structuredLocator as any;
+        const primaryStructured = primary?.structuredLocator;
+        const fieldKeys = [
+          step.elementName,
+          step.placeholder,
+          primary?.name,
+          primaryStructured?.name,
+          structured?.name
+        ].filter((key): key is string => typeof key === 'string' && key.trim().length > 0);
+        const fieldAliases = fieldKeys.flatMap(key => [
+          normalizeKey(key),
+          ...key.replace(/([a-z0-9])([A-Z])/g, '$1 $2').split(/[^a-zA-Z0-9]+/).map(normalizeKey)
+        ]).filter(key => key.length >= 3);
+        const matchedKey = Array.from(rowValues.keys()).find(key => fieldAliases.includes(key));
+        if (matchedKey) {
+          value = rowValues.get(matchedKey)!;
+          stepWasReplaced = true;
+        }
+      }
+
+      if (!stepWasReplaced) return step;
+      replacedSteps++;
+      if (firstReplacedStepIndex < 0) firstReplacedStepIndex = index;
+      return { ...step, value };
+    });
+    const repeatFromStepIndex = lastAuthenticationSubmitIndex >= 0
+      ? lastAuthenticationSubmitIndex + 1
+      : firstReplacedStepIndex;
+    return { flow: { ...flow, steps }, replacedSteps, firstReplacedStepIndex: repeatFromStepIndex };
+  };
+
   const handleDownloadSampleExcel = async () => {
     try {
       const sampleRows = [
@@ -806,6 +1007,11 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
   const [isHeadlessPlayback, setIsHeadlessPlayback] = useState<boolean>(false);
   const [playbackViewport, setPlaybackViewport] = useState<string>('1920x1080');
   const [playbackNetwork, setPlaybackNetwork] = useState<string>('No Throttling');
+  const [playbackDataset, setPlaybackDataset] = useState<DataDrivenTestData | null>(null);
+  const [isParsingPlaybackDataset, setIsParsingPlaybackDataset] = useState(false);
+  const [playbackDataRunProgress, setPlaybackDataRunProgress] = useState<{ currentRow: number; totalRows: number; passedRows: number; failedRows: number } | null>(null);
+  const playbackDatasetFileInputRef = useRef<HTMLInputElement>(null);
+  const playbackDataRunIdRef = useRef('');
 
   const [isPlaybackModalOpen, setIsPlaybackModalOpen] = useState<boolean>(false);
   const [isPlaybackFullscreen, setIsPlaybackFullscreen] = useState<boolean>(true);
@@ -816,6 +1022,7 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
   const [stepExecutionStatus, setStepExecutionStatus] = useState<Record<string, 'pending' | 'running' | 'passed' | 'failed' | 'skipped'>>({});
   const [stepExecutionTime, setStepExecutionTime] = useState<Record<string, number>>({});
   const [playbackStepScreenshots, setPlaybackStepScreenshots] = useState<Record<string, string>>({});
+  const [playbackDataBatchReport, setPlaybackDataBatchReport] = useState<PlaybackDataBatchReport | null>(null);
   const [playbackViewMode, setPlaybackViewMode] = useState<'screenshot' | 'iframe'>('screenshot');
   const [isPreparingPlayback, setIsPreparingPlayback] = useState<boolean>(false);
   const [playbackLogs, setPlaybackLogs] = useState<{ timestamp: string; level: 'info' | 'success' | 'warn' | 'error'; message: string }[]>([]);
@@ -826,12 +1033,15 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
   const [playbackFailureInfo, setPlaybackFailureInfo] = useState<{ stepIndex: number; stepName: string; error: string } | null>(null);
   const [playbackStartTime, setPlaybackStartTime] = useState<number>(0);
   const [playbackEndTime, setPlaybackEndTime] = useState<number>(0);
+  const [isChargingPlayback, setIsChargingPlayback] = useState(false);
+  const playbackCreditChargeRef = useRef(false);
   const [pendingOtp, setPendingOtp] = useState<{ sessionId: string; stepIndex: number; attempt: number; screenshot?: string; mode?: 'popup' | 'live_browser' } | null>(null);
   const [otpValue, setOtpValue] = useState('');
   const [otpSubmitting, setOtpSubmitting] = useState(false);
   const [otpTimeoutMs, setOtpTimeoutMs] = useState(300000);
   const [otpEntryMode, setOtpEntryMode] = useState<'popup' | 'live_browser'>('live_browser');
   const playbackSessionIdRef = useRef('');
+  const playbackRepeatFromUrlRef = useRef('');
 
   // Universal Web Recording: Permissions & Diagnostics States
   const [pendingPermissionRequest, setPendingPermissionRequest] = useState<BrowserPermissionRequest | null>(null);
@@ -919,8 +1129,8 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
 
   const checkIsPassword = (step: any): boolean => {
     if (!step) return false;
-    const str = `${step.locator?.primary?.value || ''} ${step.elementName || ''} ${step.selector || ''}`.toLowerCase();
-    return str.includes('pass') || str.includes('secret') || str.includes('token');
+    const str = `${step.locator?.primary?.value || ''} ${step.elementName || ''} ${step.placeholder || ''} ${step.selector || ''}`.toLowerCase();
+    return Boolean(step.masked) || str.includes('pass') || str.includes('secret') || str.includes('token');
   };
 
   const playbackCancelRef = useRef<boolean>(false);
@@ -1010,7 +1220,43 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
     setIsBrowserSelectModalOpen(true);
   };
 
-  const handleConfirmBrowserAndStartPlayback = () => {
+  const chargePlaybackCredits = async (): Promise<boolean> => {
+    if (playbackCreditChargeRef.current) return false;
+    playbackCreditChargeRef.current = true;
+    setIsChargingPlayback(true);
+    try {
+      const featureKey = 'record_playback';
+      const permission = await canPerformAction(project.id, featureKey, 'analysis', project.name);
+      if (!permission.allowed) {
+        toast.error(permission.reason || 'Insufficient project credits to start playback.');
+        return false;
+      }
+
+      const deduction = await deductProjectCredits(
+        project.id,
+        featureKey,
+        'analysis',
+        { name: user.name, email: user.email },
+        { projectName: project.name, details: 'Recorded Playback Session' }
+      );
+      if (!deduction.success) {
+        toast.error(deduction.error || 'Could not deduct playback credits. Playback was not started.');
+        return false;
+      }
+
+      toast.success(`Playback started! ${deduction.deducted} credits deducted. Remaining: ${deduction.remainingCredits}`);
+      return true;
+    } catch (error: any) {
+      console.error('[RecordAndPlay] Failed to charge playback credits:', error);
+      toast.error(error?.message || 'Could not verify playback credits. Playback was not started.');
+      return false;
+    } finally {
+      playbackCreditChargeRef.current = false;
+      setIsChargingPlayback(false);
+    }
+  };
+
+  const handleConfirmBrowserAndStartPlayback = async () => {
     if (!pendingPlaybackFlow) return;
 
     const chosenBrowserObj = PLAYBACK_BROWSER_OPTIONS.find(b => b.id === playbackSelectedBrowser) || PLAYBACK_BROWSER_OPTIONS[0];
@@ -1026,6 +1272,44 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
     }
 
     const activeFlow = pendingPlaybackFlow;
+    let dataRun: PlaybackDataRun | undefined;
+    if (playbackDataset) {
+      if (playbackDataset.rows.length === 0) {
+        toast.error('The selected playback worksheet has no data rows.');
+        return;
+      }
+      const { replacedSteps, firstReplacedStepIndex } = applyPlaybackDatasetRow(activeFlow, playbackDataset.rows[0]);
+      if (replacedSteps === 0) {
+        toast.error('No recorded input steps match the dataset columns. Match a column to a field name/placeholder or use {{columnName}} in the recorded input value.');
+        return;
+      }
+      dataRun = {
+        id: globalThis.crypto?.randomUUID?.() || `playback-data-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        flow: activeFlow,
+        dataset: playbackDataset,
+        rowIndex: 0,
+        passedRows: 0,
+        failedRows: 0,
+        repeatFromStepIndex: firstReplacedStepIndex,
+        reports: [],
+        batchStartedAt: Date.now()
+      };
+    }
+
+    if (!await chargePlaybackCredits()) return;
+
+    if (dataRun) {
+      playbackDataRunIdRef.current = dataRun.id;
+      playbackRepeatFromUrlRef.current = '';
+      setPlaybackDataBatchReport(null);
+      setPlaybackDataRunProgress({ currentRow: 1, totalRows: playbackDataset.rows.length, passedRows: 0, failedRows: 0 });
+    } else {
+      playbackDataRunIdRef.current = '';
+      playbackRepeatFromUrlRef.current = '';
+      setPlaybackDataBatchReport(null);
+      setPlaybackDataRunProgress(null);
+    }
+
     setPlaybackFlow(activeFlow);
     setIsBrowserSelectModalOpen(false);
     setIsPlaybackModalOpen(true);
@@ -1093,17 +1377,37 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
         message: `⚡ Preloaded metadata for Step #1 [${(firstStep?.action || 'step').toUpperCase()}]. Session starting...`
       }
     ]);
+    if (dataRun) {
+      setPlaybackLogs(prev => [...prev, {
+        timestamp: new Date().toLocaleTimeString(),
+        level: 'info',
+        message: 'Login/setup runs on the first row. Later rows reuse that authenticated browser session and restart from the first dataset-matched input.'
+      }]);
+    }
 
     setTimeout(() => {
-      handleRunPlayback(activeFlow);
+      void handleRunPlayback(activeFlow, dataRun, true);
     }, 10);
   };
 
-  const handleRunPlayback = async (flowOverride?: RecordedFlow) => {
-    const targetFlow = flowOverride || playbackFlow;
-    if (!targetFlow || !targetFlow.steps || targetFlow.steps.length === 0) return;
+  const handleRunPlayback = async (flowOverride?: RecordedFlow, dataRun?: PlaybackDataRun, playbackCreditsAlreadyCharged = false) => {
+    const sourceFlow = flowOverride || playbackFlow;
+    if (!sourceFlow || !sourceFlow.steps || sourceFlow.steps.length === 0) return;
 
-    setPlaybackFlow(targetFlow);
+    const targetFlow = dataRun
+      ? applyPlaybackDatasetRow(sourceFlow, dataRun.dataset.rows[dataRun.rowIndex]).flow
+      : sourceFlow;
+    const rowStartedAt = Date.now();
+    const rowStepStatuses: Record<string, 'pending' | 'running' | 'passed' | 'failed' | 'skipped'> = {};
+    const rowStepTimes: Record<string, number> = {};
+    const rowScreenshots: Record<string, string> = {};
+    let rowFailureInfo: PlaybackDataRowReport['failureInfo'] = null;
+    targetFlow.steps.forEach(step => {
+      rowStepStatuses[step.id] = step.skipped ? 'skipped' : 'pending';
+      if (step.screenshot) rowScreenshots[step.id] = step.screenshot;
+    });
+
+    setPlaybackFlow(sourceFlow);
 
     if (playbackStatus === 'paused') {
       playbackPauseRef.current = false;
@@ -1115,24 +1419,174 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
       }]);
       return;
     }
+    if (!dataRun && playbackDataRunIdRef.current) return;
+    if (!dataRun && !playbackCreditsAlreadyCharged && !await chargePlaybackCredits()) return;
+    if (!dataRun) {
+      setPlaybackDataRunProgress(null);
+      setPlaybackDataBatchReport(null);
+    }
+
+    const finishDataDrivenRow = (rowPassed: boolean): boolean => {
+      if (!dataRun || playbackDataRunIdRef.current !== dataRun.id || playbackCancelRef.current) return false;
+
+      const completedRows = dataRun.rowIndex + 1;
+      const passedRows = dataRun.passedRows + (rowPassed ? 1 : 0);
+      const failedRows = dataRun.failedRows + (rowPassed ? 0 : 1);
+      const nextRowIndex = dataRun.rowIndex + 1;
+      const totalRows = dataRun.dataset.rows.length;
+      if (!rowPassed && !rowFailureInfo) {
+        rowFailureInfo = {
+          stepIndex: -1,
+          stepName: 'Playback Engine',
+          error: 'The data row failed before a failed step result was available.'
+        };
+      }
+      const reports = [...dataRun.reports, {
+        rowIndex: dataRun.rowIndex,
+        flow: targetFlow,
+        stepExecutionStatus: { ...rowStepStatuses },
+        stepExecutionTime: { ...rowStepTimes },
+        screenshots: { ...rowScreenshots },
+        status: rowPassed ? 'completed' as const : 'failed' as const,
+        failureInfo: rowFailureInfo,
+        startTime: rowStartedAt,
+        endTime: Date.now()
+      }];
+
+      setPlaybackDataRunProgress({ currentRow: Math.min(nextRowIndex + 1, totalRows), totalRows, passedRows, failedRows });
+      setPlaybackLogs(prev => [...prev, {
+        timestamp: new Date().toLocaleTimeString(),
+        level: rowPassed ? 'success' : 'error',
+        message: `Data row ${completedRows}/${totalRows} ${rowPassed ? 'passed' : 'failed'}.`
+      }]);
+
+      if (nextRowIndex < totalRows) {
+        const nextRun: PlaybackDataRun = { ...dataRun, rowIndex: nextRowIndex, passedRows, failedRows, reports };
+        setPlaybackLogs(prev => [...prev, {
+          timestamp: new Date().toLocaleTimeString(),
+          level: 'info',
+          message: `Starting playback with data row ${nextRowIndex + 1}/${totalRows}.`
+        }]);
+        window.setTimeout(() => {
+          if (playbackDataRunIdRef.current === dataRun.id && !playbackCancelRef.current) {
+            void handleRunPlayback(dataRun.flow, nextRun);
+          }
+        }, 500);
+        return true;
+      }
+
+      playbackDataRunIdRef.current = '';
+      playbackSessionIdRef.current = '';
+      playbackRepeatFromUrlRef.current = '';
+      setPlaybackDataRunProgress({ currentRow: totalRows, totalRows, passedRows, failedRows });
+      const combinedStatuses: PlaybackDataBatchReport['stepExecutionStatus'] = {};
+      const combinedTimes: PlaybackDataBatchReport['stepExecutionTime'] = {};
+      const combinedScreenshots: PlaybackDataBatchReport['screenshots'] = {};
+      const combinedSteps: RecordedStep[] = [];
+      let combinedFailureInfo: PlaybackDataBatchReport['failureInfo'] = null;
+      reports.forEach(report => {
+        const rowLabel = `Data row ${report.rowIndex + 1}/${totalRows}`;
+        const rowStepOffset = combinedSteps.length;
+        report.flow.steps.forEach(step => {
+          const reportStepId = `data-row-${report.rowIndex + 1}-${step.id}`;
+          combinedSteps.push({
+            ...step,
+            id: reportStepId,
+            elementName: `${rowLabel} · ${step.elementName || step.locator?.primary?.value || step.action}`
+          });
+          combinedStatuses[reportStepId] = report.stepExecutionStatus[step.id] || 'pending';
+          combinedTimes[reportStepId] = report.stepExecutionTime[step.id] || 0;
+          const screenshot = report.screenshots[step.id] || step.screenshot;
+          if (screenshot) combinedScreenshots[reportStepId] = screenshot;
+        });
+        if (!combinedFailureInfo && report.failureInfo) {
+          combinedFailureInfo = {
+            ...report.failureInfo,
+            stepIndex: report.failureInfo.stepIndex >= 0
+              ? rowStepOffset + report.failureInfo.stepIndex
+              : -1,
+            stepName: `${rowLabel}: ${report.failureInfo.stepName}`
+          };
+        }
+      });
+      setPlaybackDataBatchReport({
+        flow: {
+          ...dataRun.flow,
+          name: `${dataRun.flow.name || 'Playback Flow'} — ${totalRows} data rows`,
+          steps: combinedSteps
+        },
+        stepExecutionStatus: combinedStatuses,
+        stepExecutionTime: combinedTimes,
+        screenshots: combinedScreenshots,
+        status: failedRows > 0 ? 'failed' : 'completed',
+        failureInfo: combinedFailureInfo || (failedRows > 0 ? {
+          stepIndex: -1,
+          stepName: 'Data-driven playback',
+          error: `${failedRows} of ${totalRows} data rows failed; ${passedRows} passed.`
+        } : null),
+        startTime: dataRun.batchStartedAt,
+        endTime: Date.now()
+      });
+      setPlaybackStepScreenshots(combinedScreenshots);
+      if (failedRows > 0) {
+        setPlaybackStatus('failed');
+        setPlaybackFailureInfo({
+          stepIndex: -1,
+          stepName: 'Data-driven playback',
+          error: `${failedRows} of ${totalRows} data rows failed; ${passedRows} passed.`
+        });
+        setPlaybackLogs(prev => [...prev, {
+          timestamp: new Date().toLocaleTimeString(),
+          level: 'error',
+          message: `Data-driven playback finished: ${passedRows}/${totalRows} rows passed; ${failedRows} failed.`
+        }]);
+        toast.error(`Data-driven playback finished: ${failedRows} of ${totalRows} rows failed.`);
+      } else {
+        setPlaybackStatus('completed');
+        setPlaybackLogs(prev => [...prev, {
+          timestamp: new Date().toLocaleTimeString(),
+          level: 'success',
+          message: `Data-driven playback completed successfully: all ${totalRows} rows passed.`
+        }]);
+        toast.success(`Data-driven playback completed: all ${totalRows} rows passed.`);
+      }
+      return false;
+    };
 
     playbackCancelRef.current = false;
     playbackPauseRef.current = false;
-    playbackSessionIdRef.current = globalThis.crypto?.randomUUID?.() || `playback-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    if (!dataRun || dataRun.rowIndex === 0 || !playbackSessionIdRef.current) {
+      playbackSessionIdRef.current = globalThis.crypto?.randomUUID?.() || `playback-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
     setPendingOtp(null);
     setOtpValue('');
     setPlaybackFailureInfo(null);
     setPlaybackStartTime(Date.now());
     setPlaybackEndTime(0);
     setPlaybackStatus('running');
+    if (dataRun) {
+      setPlaybackDataRunProgress({
+        currentRow: dataRun.rowIndex + 1,
+        totalRows: dataRun.dataset.rows.length,
+        passedRows: dataRun.passedRows,
+        failedRows: dataRun.failedRows
+      });
+      setPlaybackLogs(prev => [...prev, {
+        timestamp: new Date().toLocaleTimeString(),
+        level: 'info',
+        message: `Running data row ${dataRun.rowIndex + 1}/${dataRun.dataset.rows.length} from "${dataRun.dataset.fileName}".`
+      }]);
+    }
 
     const steps = targetFlow.steps;
     const chosenBrowserObj = PLAYBACK_BROWSER_OPTIONS.find(b => b.id === playbackSelectedBrowser) || PLAYBACK_BROWSER_OPTIONS[0];
 
-    let currentLiveUrl = playbackActiveUrl || targetUrl;
+    let currentLiveUrl = dataRun && dataRun.rowIndex > 0
+      ? playbackRepeatFromUrlRef.current || playbackActiveUrl || targetUrl
+      : playbackActiveUrl || targetUrl;
     if (steps.length > 0) {
       const firstNav = steps.find(s => s.action === 'navigate' || s.url || (s.value && (s.value.startsWith('http') || s.value.startsWith('/'))));
-      if (firstNav) {
+      if (firstNav && !(dataRun && dataRun.rowIndex > 0 && playbackRepeatFromUrlRef.current)) {
         const startUrl = sanitizeClientUrl(firstNav.value || firstNav.url, currentLiveUrl);
         if (startUrl) {
           currentLiveUrl = startUrl;
@@ -1241,6 +1695,11 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
           isHeadless: isHeadlessPlayback,
           stream: true,
           playbackSessionId: playbackSessionIdRef.current,
+          retainBrowserSession: Boolean(dataRun && dataRun.rowIndex < dataRun.dataset.rows.length - 1),
+          startStepIndex: dataRun && dataRun.rowIndex > 0 && playbackRepeatFromUrlRef.current
+            ? dataRun.repeatFromStepIndex
+            : 0,
+          repeatFromStepIndex: dataRun?.repeatFromStepIndex ?? 0,
           otpTimeoutMs,
           otpEntryMode,
           projectId: project?.id,
@@ -1281,6 +1740,13 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
                       clearTimeout(prepTimer);
                       setIsPreparingPlayback(false);
                       if (eventData.type === 'session_ready' && eventData.initialUrl) setPlaybackActiveUrl(eventData.initialUrl);
+                    } else if (
+                      eventData.type === 'repeat_boundary' &&
+                      dataRun?.rowIndex === 0 &&
+                      eventData.stepIndex === dataRun.repeatFromStepIndex &&
+                      eventData.url
+                    ) {
+                      playbackRepeatFromUrlRef.current = eventData.url;
                     } else if (eventData.type === 'otp_required') {
                       playbackPauseRef.current = true;
                       setPlaybackStatus('paused');
@@ -1289,6 +1755,12 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
                       setPlaybackActiveTab('view');
                       if (eventData.screenshot) setPlaybackStepScreenshots(prev => ({ ...prev, [`otp-${eventData.stepIndex}-${eventData.attempt || 1}`]: eventData.screenshot }));
                       setPlaybackLogs(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), level: 'warn', message: `Playback paused for manual OTP entry at step ${(eventData.stepIndex || 0) + 1}.` }]);
+                    } else if (eventData.type === 'otp_resumed') {
+                      playbackPauseRef.current = false;
+                      setPlaybackStatus('running');
+                      setPendingOtp(null);
+                      setOtpValue('');
+                      setPlaybackLogs(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), level: 'success', message: 'OTP verified; playback resumed automatically.' }]);
                     } else if (eventData.type === 'step_result' && eventData.result) {
                       clearTimeout(prepTimer);
                       setIsPreparingPlayback(false);
@@ -1429,6 +1901,8 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
 
         // If this step was marked skipped because of a previous failure
         if (resItem.status === 'skipped') {
+          rowStepStatuses[resItem.stepId] = 'skipped';
+          rowStepTimes[resItem.stepId] = 0;
           setStepExecutionStatus(prev => ({ ...prev, [resItem.stepId]: 'skipped' }));
           setStepExecutionTime(prev => ({ ...prev, [resItem.stepId]: 0 }));
           setPlaybackLogs(prev => [...prev, {
@@ -1451,6 +1925,7 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
         }
 
         if (resItem.screenshot) {
+          rowScreenshots[resItem.stepId] = resItem.screenshot;
           setPlaybackStepScreenshots(prev => ({ ...prev, [resItem.stepId]: resItem.screenshot }));
         }
 
@@ -1520,6 +1995,8 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
         }
 
         // Update timeline status to final result
+        rowStepStatuses[resItem.stepId] = resItem.status;
+        rowStepTimes[resItem.stepId] = resItem.duration;
         setStepExecutionStatus(prev => ({ ...prev, [resItem.stepId]: resItem.status }));
         setStepExecutionTime(prev => ({ ...prev, [resItem.stepId]: resItem.duration }));
 
@@ -1543,6 +2020,11 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
         if (resItem.status === 'failed') {
           hasFailed = true;
           const failStepName = step.elementName || step.locator?.primary?.value || step.action;
+          rowFailureInfo = {
+            stepIndex: resItem.stepIndex,
+            stepName: failStepName,
+            error: resItem.error || 'Step execution failed'
+          };
           setPlaybackFailureInfo({
             stepIndex: resItem.stepIndex,
             stepName: failStepName,
@@ -1556,6 +2038,10 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
             const nextStep = steps[sIdx];
             setStepExecutionStatus(prev => ({ ...prev, [nextStep.id]: 'skipped' }));
             setStepExecutionTime(prev => ({ ...prev, [nextStep.id]: 0 }));
+          }
+          if (dataRun) {
+            finishDataDrivenRow(false);
+            return;
           }
           break;
         }
@@ -1574,6 +2060,14 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
       }
 
       if (!hasFailed && !playbackCancelRef.current && processedCount > 0) {
+        if (dataRun) {
+          setPlaybackStatus('completed');
+          setPlaybackEndTime(Date.now());
+          setPlaybackActiveTab('report');
+          setCurrentPlaybackStepIndex(steps.length);
+          finishDataDrivenRow(true);
+          return;
+        }
         setPlaybackStatus('completed');
         setPlaybackEndTime(Date.now());
         setPlaybackActiveTab('report');
@@ -1587,6 +2081,13 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
         return;
       }
       if (hasFailed && !playbackCancelRef.current) {
+        if (dataRun) {
+          setPlaybackStatus('failed');
+          setPlaybackEndTime(Date.now());
+          setPlaybackActiveTab('report');
+          finishDataDrivenRow(false);
+          return;
+        }
         setPlaybackStatus('failed');
         setPlaybackEndTime(Date.now());
         setPlaybackActiveTab('report');
@@ -1598,6 +2099,13 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
         return;
       }
       if (!playbackCancelRef.current) {
+        if (dataRun) {
+          setPlaybackStatus('failed');
+          setPlaybackEndTime(Date.now());
+          setPlaybackActiveTab('report');
+          finishDataDrivenRow(false);
+          return;
+        }
         setPlaybackStatus('failed');
         setPlaybackEndTime(Date.now());
         setPlaybackActiveTab('report');
@@ -1633,11 +2141,20 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
         stepName: 'Playback Engine',
         error: err?.message || 'Playback engine exception'
       });
+      rowFailureInfo = {
+        stepIndex: currentPlaybackStepIndex >= 0 ? currentPlaybackStepIndex : -1,
+        stepName: 'Playback Engine',
+        error: err?.message || 'Playback engine exception'
+      };
       setPlaybackLogs(prev => [...prev, {
         timestamp: new Date().toLocaleTimeString(),
         level: 'error',
         message: `Playback engine failed before completion: ${err?.message || String(err)}`
       }]);
+      if (dataRun) {
+        finishDataDrivenRow(false);
+        return;
+      }
       toast.error(`Playback failed: ${err?.message || 'playback engine unavailable'}`);
       return;
     }
@@ -1712,6 +2229,17 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
   };
 
   const handleStopPlayback = () => {
+    playbackDataRunIdRef.current = '';
+    const playbackSessionId = playbackSessionIdRef.current;
+    playbackSessionIdRef.current = '';
+    playbackRepeatFromUrlRef.current = '';
+    if (playbackSessionId) {
+      void fetch('/api/run-playback/session/close', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: playbackSessionId })
+      }).catch(error => console.error('[RecordAndPlay] Failed to close playback browser session:', error));
+    }
     if (pendingOtp?.sessionId) {
       void fetch('/api/run-playback/otp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: pendingOtp.sessionId, cancel: true }) }).catch(() => {});
     }
@@ -1721,6 +2249,7 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
     setPlaybackStatus('idle');
     setPendingOtp(null);
     setOtpValue('');
+    setPlaybackDataRunProgress(null);
     setCurrentPlaybackStepIndex(-1);
     setCursorPos({ x: 15, y: 15 });
     setPrevCursorPos({ x: 15, y: 15 });
@@ -1778,17 +2307,28 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
 
   const performLiveDeviceAction = async (action: string, params: any) => {
     try {
-      await fetch('/api/device-agent/perform-action', {
+      const sessionId = sessionIdRef.current;
+      const response = await fetch('/api/device-agent/perform-action', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           email: user?.email || 'sowbarnya@qaoncloud.com',
           action,
-          params
+          params: {
+            ...params,
+            deviceId: params.deviceId || mobileDevice || undefined,
+            sessionId: params.sessionId || sessionId || undefined
+          }
         })
       });
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        throw new Error(result.error || `Device agent returned ${response.status}`);
+      }
     } catch (e) {
-      console.error("Failed to post device action:", e);
+      const message = e instanceof Error ? e.message : String(e);
+      console.error("Failed to post device action:", message);
+      toast.error(`Could not execute ${action} on the connected device: ${message}`);
     }
   };
 
@@ -3141,9 +3681,13 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
         { name: user.name, email: user.email },
         { projectName: project.name, details: 'Mobile App Recording Session (Start Recording)' }
       );
-      if (deductRes.success) {
-        toast.success(`Mobile Recording Started! 50 credits deducted. Remaining: ${deductRes.remainingCredits}`);
+      if (!deductRes.success) {
+        toast.error(deductRes.error || 'Could not deduct mobile recording credits. Recording was not started.');
+        setIsStarting(false);
+        setIsStartModalOpen(true);
+        return;
       }
+      toast.success(`Mobile Recording Started! ${deductRes.deducted} credits deducted. Remaining: ${deductRes.remainingCredits}`);
 
       // Step 1: Resolve target package & application metadata
       let targetPkg = (mobileAppType === 'installed' ? (mobileInstalledApp || 'org.fdroid.fdroid') : (mobilePackageName || 'org.fdroid.fdroid'));
@@ -3166,6 +3710,7 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
       setMobilePackageName(targetPkg);
       setMobileInstalledApp(targetPkg);
       let activeDeviceName = mobileDevice || 'emulator-5554';
+      const mobileSession = `mob-${Date.now().toString(36)}-${Math.random().toString(36).substring(7)}`;
 
       let appDetails = '';
       if (mobileAppType === 'installed') {
@@ -3230,22 +3775,8 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
               deviceId: activeDeviceName,
               packageName: targetPkg,
               launchActivity: mobileAppActivity || '.MainActivity',
-              forceStopPrevious: true
-            })
-          }).catch(() => {});
-
-          // Also queue perform-action for physical/local agent
-          await fetch('/api/device-agent/perform-action', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              email: userEmail,
-              action: 'launch_app',
-              params: {
-                packageName: targetPkg,
-                launchActivity: mobileAppActivity || '.MainActivity',
-                deviceId: activeDeviceName
-              }
+              forceStopPrevious: true,
+              sessionId: mobileSession
             })
           }).catch(() => {});
         } catch (e: any) {
@@ -3257,7 +3788,6 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
       toast.success(`Successfully opened "${appDetails}" in Android Emulator!`, { id: launchToastId });
 
       // Step 4: Now that app is open, start recording session
-      const mobileSession = `mob-${Date.now().toString(36)}-${Math.random().toString(36).substring(7)}`;
       setSessionId(mobileSession);
       sessionIdRef.current = mobileSession;
       setFlowName(tempRecordingName);
@@ -4290,12 +4820,7 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
 
   // Helper to determine folder platform (web vs mobile) based on its contents, platform field, or naming
   const getFolderPlatform = (folder: { id: string; name: string; type?: string; platform?: 'web' | 'mobile' }): 'web' | 'mobile' => {
-    // 1. If explicit platform property is set on the folder, honor it
-    if (folder.platform === 'mobile' || folder.platform === 'web') {
-      return folder.platform;
-    }
-
-    // 2. Check if folder contains any flows with explicit or detected platform
+    // Recover legacy folders whose persisted platform disagrees with their records.
     const folderFlows = effectiveFlows.filter(f => isItemInFolder(f.folderId, folder.id, project.automationFolders, { folderName: f.folderName, title: f.name }));
     const hasMobileFlows = folderFlows.some(f => getFlowPlatform(f) === 'mobile');
     const hasWebFlows = folderFlows.some(f => getFlowPlatform(f) === 'web');
@@ -4303,7 +4828,6 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
     if (hasMobileFlows && !hasWebFlows) return 'mobile';
     if (hasWebFlows && !hasMobileFlows) return 'web';
 
-    // 3. Check if folder contains any scripts with explicit or detected platform
     const folderScripts = effectiveScripts.filter(s => isItemInFolder(s.folderId, folder.id, project.automationFolders, { flowId: s.flowId, folderName: s.folderName, title: s.title }));
     const hasMobileScripts = folderScripts.some(s => getScriptPlatform(s) === 'mobile');
     const hasWebScripts = folderScripts.some(s => getScriptPlatform(s) === 'web');
@@ -4311,7 +4835,11 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
     if (hasMobileScripts && !hasWebScripts) return 'mobile';
     if (hasWebScripts && !hasMobileScripts) return 'web';
 
-    // 4. Name heuristics for legacy/unmigrated folders
+    if (folder.platform === 'mobile' || folder.platform === 'web') {
+      return folder.platform;
+    }
+
+    // Name heuristics for legacy/unmigrated folders
     const lower = (folder.name || '').trim().toLowerCase();
     if (
       lower.startsWith('mob') ||
@@ -5191,9 +5719,11 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
       { name: user.name, email: user.email },
       { projectName: project.name, details: `${platform === 'mobile' ? 'Mobile App' : 'Web'} Script Generation` }
     );
-    if (scriptDeductRes.success) {
-      toast.success(`Generate Scripts successful! ${scriptDeductRes.deducted} credits deducted. Remaining: ${scriptDeductRes.remainingCredits}`);
+    if (!scriptDeductRes.success) {
+      toast.error(scriptDeductRes.error || 'Could not deduct script generation credits. Scripts were not generated.');
+      return;
     }
+    toast.success(`Generate Scripts successful! ${scriptDeductRes.deducted} credits deducted. Remaining: ${scriptDeductRes.remainingCredits}`);
 
     setIsGenerating(true);
     setGenerationStages({
@@ -10005,6 +10535,71 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
                   })}
                 </div>
 
+                <div className="rounded-2xl border border-teal-500/20 bg-teal-950/20 p-5 space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h4 className="flex items-center gap-2 text-xs font-black uppercase tracking-wider text-teal-200">
+                        <FileSpreadsheet size={14} /> Data-Driven Playback <span className="text-[9px] text-slate-400">(Optional)</span>
+                      </h4>
+                      <p className="mt-1 text-[10px] leading-relaxed text-slate-400">
+                        Replay once per dataset row. Column headers should match recorded field names/placeholders, or use <code className="text-teal-300">{'{{columnName}}'}</code> in a recorded input value.
+                      </p>
+                    </div>
+                    <input
+                      ref={playbackDatasetFileInputRef}
+                      type="file"
+                      accept=".xlsx,.xls,.csv,.json,application/json"
+                      className="hidden"
+                      onChange={handlePlaybackDatasetUpload}
+                    />
+                    <button
+                      type="button"
+                      disabled={isParsingPlaybackDataset}
+                      onClick={() => playbackDatasetFileInputRef.current?.click()}
+                      className="shrink-0 rounded-xl border border-teal-500/30 bg-teal-500/10 px-3 py-2 text-[10px] font-bold text-teal-200 hover:bg-teal-500/20 disabled:opacity-50"
+                    >
+                      {isParsingPlaybackDataset ? 'Loading...' : playbackDataset ? 'Replace File' : 'Upload Test Data'}
+                    </button>
+                  </div>
+                  {playbackDataset && (
+                    <div className="flex flex-wrap items-center gap-2 border-t border-teal-500/10 pt-3">
+                      <span className="max-w-[220px] truncate rounded-lg bg-slate-900 px-2.5 py-1.5 text-[10px] font-bold text-slate-200" title={playbackDataset.fileName}>
+                        {playbackDataset.fileName}
+                      </span>
+                      <span className="text-[10px] text-teal-300">{playbackDataset.rows.length} rows</span>
+                      {playbackDataset.sheetNames.length > 1 && (
+                        <select
+                          value={playbackDataset.activeSheet}
+                          onChange={event => {
+                            const activeSheet = event.target.value;
+                            const sheetData = playbackDataset.allSheetsData?.[activeSheet];
+                            if (sheetData) setPlaybackDataset({ ...playbackDataset, activeSheet, headers: sheetData.headers, rows: sheetData.rows });
+                          }}
+                          className="max-w-[180px] rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-[10px] text-white"
+                        >
+                          {playbackDataset.sheetNames.map(sheet => (
+                            <option key={sheet} value={sheet}>{sheet} ({playbackDataset.allSheetsData?.[sheet]?.rows.length || 0})</option>
+                          ))}
+                        </select>
+                      )}
+                      <span className="min-w-0 flex-1 truncate text-[9px] text-slate-400" title={playbackDataset.headers.join(', ')}>
+                        Columns: {playbackDataset.headers.join(', ')}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPlaybackDataset(null);
+                          setPlaybackDataRunProgress(null);
+                          toast.info('Playback dataset removed; playback will run normally.');
+                        }}
+                        className="rounded-lg px-2 py-1.5 text-[10px] font-bold text-rose-300 hover:bg-rose-500/10"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  )}
+                </div>
+
                 {/* Additional Settings */}
                 <div className="p-5 bg-slate-950 rounded-2xl border border-slate-800/80 space-y-4">
                   <h4 className="text-xs font-black text-slate-300 uppercase tracking-wider flex items-center gap-2">
@@ -10092,9 +10687,10 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
 
                 <button 
                   onClick={handleConfirmBrowserAndStartPlayback}
-                  className="flex-1 max-w-md py-3.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-2xl text-xs font-black uppercase tracking-widest transition-all shadow-xl shadow-emerald-950/50 flex items-center justify-center gap-2"
+                  disabled={isParsingPlaybackDataset || isChargingPlayback}
+                  className="flex-1 max-w-md py-3.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-2xl text-xs font-black uppercase tracking-widest transition-all shadow-xl shadow-emerald-950/50 flex items-center justify-center gap-2 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  <Play size={16} fill="currentColor" /> Start Playback in {PLAYBACK_BROWSER_OPTIONS.find(b => b.id === playbackSelectedBrowser)?.name || 'Chrome'}
+                  <Play size={16} fill="currentColor" /> {isChargingPlayback ? 'Charging 50 Credits...' : `Start Playback (50 credits) in ${PLAYBACK_BROWSER_OPTIONS.find(b => b.id === playbackSelectedBrowser)?.name || 'Chrome'}`}
                 </button>
               </div>
             </motion.div>
@@ -10159,6 +10755,11 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
                     <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-0.5 flex items-center gap-2 flex-wrap">
                       <span>Flow: <span className="text-indigo-400">{playbackFlow?.name || 'Flow'}</span></span>
                       <span>• {playbackFlow?.steps?.length || 0} Steps</span>
+                      {playbackDataRunProgress && (
+                        <span className="rounded bg-teal-500/10 px-2 py-0.5 text-teal-300 border border-teal-500/20">
+                          Data row {playbackDataRunProgress.currentRow}/{playbackDataRunProgress.totalRows} • {playbackDataRunProgress.passedRows} passed / {playbackDataRunProgress.failedRows} failed
+                        </span>
+                      )}
                       <span className="px-2 py-0.5 rounded bg-slate-800 text-emerald-400 border border-emerald-500/30 text-[9px] flex items-center gap-1">
                         {playbackFlow?.platform === 'mobile' ? (
                           <>
@@ -10347,23 +10948,23 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
               {playbackActiveTab === 'report' ? (
                 <div className="flex-1 overflow-hidden flex flex-col bg-[#1b1c21]">
                   <AllurePlaybackReport
-                    playbackFlow={playbackFlow}
-                    playbackStatus={playbackStatus}
-                    stepExecutionStatus={stepExecutionStatus}
-                    stepExecutionTime={stepExecutionTime}
-                    playbackStepScreenshots={playbackStepScreenshots}
+                    playbackFlow={playbackDataBatchReport?.flow || playbackFlow}
+                    playbackStatus={playbackDataBatchReport?.status || playbackStatus}
+                    stepExecutionStatus={playbackDataBatchReport?.stepExecutionStatus || stepExecutionStatus}
+                    stepExecutionTime={playbackDataBatchReport?.stepExecutionTime || stepExecutionTime}
+                    playbackStepScreenshots={playbackDataBatchReport?.screenshots || playbackStepScreenshots}
                     playbackLogs={playbackLogs}
-                    playbackFailureInfo={playbackFailureInfo}
-                    playbackStartTime={playbackStartTime}
-                    playbackEndTime={playbackEndTime}
+                    playbackFailureInfo={playbackDataBatchReport?.failureInfo || playbackFailureInfo}
+                    playbackStartTime={playbackDataBatchReport?.startTime || playbackStartTime}
+                    playbackEndTime={playbackDataBatchReport?.endTime || playbackEndTime}
                     playbackSelectedBrowser={PLAYBACK_BROWSER_OPTIONS.find(b => b.id === playbackSelectedBrowser)?.name || 'Google Chrome'}
                     targetUrl={targetUrl}
                     onBackToLiveView={() => setPlaybackActiveTab('view')}
                     onReplayFlow={() => handleRunPlayback()}
-                    onOpenVideo={(flow) => handleOpenRecordedVideo(flow || playbackFlow)}
-                    onDownloadVideo={(flow) => handleDownloadVideoFromPlayback(flow || playbackFlow)}
-                    onFixAndReplayFlow={handleFixAndReplayFlow}
-                    onSaveFixedFlow={handleSaveFixedFlowOnly}
+                    onOpenVideo={(flow) => handleOpenRecordedVideo(playbackDataBatchReport ? playbackFlow : flow || playbackFlow)}
+                    onDownloadVideo={(flow) => handleDownloadVideoFromPlayback(playbackDataBatchReport ? playbackFlow : flow || playbackFlow)}
+                    onFixAndReplayFlow={playbackDataBatchReport ? undefined : handleFixAndReplayFlow}
+                    onSaveFixedFlow={playbackDataBatchReport ? undefined : handleSaveFixedFlowOnly}
                   />
                 </div>
               ) : (
@@ -11045,7 +11646,7 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
               <div className="rounded-xl bg-indigo-500/15 p-3 text-indigo-300"><ShieldCheck size={22} /></div>
               <div><h2 className="text-lg font-black">TOTP Verification Required</h2><p className="text-xs text-slate-400">The active playback session is paused.</p></div>
             </div>
-            <p className="mb-5 text-sm text-slate-300">{pendingOtp.mode === 'live_browser' ? 'Enter and submit your authenticator code in the visible browser window. Then return here and continue playback. The code is not captured by AutomatiQA.' : 'Enter the current authenticator code to continue playback. The code is sent to the active Playwright session and is not saved in reports.'}</p>
+            <p className="mb-5 text-sm text-slate-300">{pendingOtp.mode === 'live_browser' ? 'Enter and submit your authenticator code in the visible browser window. Playback will resume automatically after verification; use the button below only if it does not continue. The code is not captured by AutomatiQA.' : 'Enter the current authenticator code to continue playback. The code is sent to the active Playwright session and is not saved in reports.'}</p>
             {pendingOtp.screenshot && <img className="mb-5 max-h-40 w-full rounded-xl border border-slate-700 object-cover" src={pendingOtp.screenshot} alt="OTP verification screen" />}
             {pendingOtp.mode !== 'live_browser' && <>
               <label htmlFor="playback-otp" className="mb-2 block text-xs font-bold uppercase tracking-wider text-slate-400">Authenticator code</label>

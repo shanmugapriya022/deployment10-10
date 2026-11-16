@@ -396,6 +396,37 @@ export const syncFolderReferences = <T extends Partial<Project>>(project: T): T 
     return script;
   });
 
+  // Older folders may have been persisted as "web" before their platform was
+  // recorded. Prefer the platform of the records actually assigned to them.
+  canonicalFolders.forEach(folder => {
+    const linkedPlatforms = new Set<string>();
+    updatedRecordedFlows.forEach(flow => {
+      if (flow.folderId === folder.id) {
+        linkedPlatforms.add(
+          flow.platform === 'mobile' || flow.tool === 'Appium' || flow.mobilePackageName ? 'mobile' : 'web'
+        );
+      }
+    });
+    updatedUploadFlows.forEach(flow => {
+      if (flow.folderId === folder.id) {
+        linkedPlatforms.add(flow.platform === 'mobile' ? 'mobile' : 'web');
+      }
+    });
+    updatedScripts.forEach(script => {
+      if (script.folderId === folder.id) {
+        linkedPlatforms.add(
+          script.platform === 'mobile' || script.tool === 'Appium' || script.appPackage ? 'mobile' : 'web'
+        );
+      }
+    });
+
+    if (linkedPlatforms.size === 1) {
+      folder.platform = Array.from(linkedPlatforms)[0] as 'web' | 'mobile';
+    } else if (!folder.platform) {
+      folder.platform = 'web';
+    }
+  });
+
   return {
     ...project,
     automationFolders: canonicalFolders,
@@ -1855,9 +1886,6 @@ export const mergeProjectWithBackupData = (
 
   return syncFolderReferences({
     ...project,
-    jiraConfig: project.jiraConfig || backup.jiraConfig,
-    githubConfig: project.githubConfig || backup.githubConfig,
-    slackConfig: project.slackConfig || backup.slackConfig,
     scenarios: mergedScenarios,
     manualTestCases: mergeRecords(project.manualTestCases || [], backup.manualTestCases || []),
     apiHistory: mergeRecords(project.apiHistory || [], backup.apiHistory || []),
