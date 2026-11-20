@@ -992,6 +992,43 @@ export const mergeRecordedFlowsWithBackup = (
     if (isTrimmedScriptText(backup) && !isTrimmedScriptText(current)) return current;
     return String(backup || '').length > String(current || '').length ? backup : current || backup;
   };
+  const isConcreteLocator = (value: unknown): boolean => {
+    if (typeof value !== 'string' || !value.trim()) return false;
+    const locator = value.trim();
+    if (/^(?:element|target element|unknown|locator|body)$/i.test(locator)) return false;
+    return !/^(?:await\s+)?page\.locator\(['"](?:element|target element|unknown|body)['"]\)(?:\.\w+\([^)]*\))?;?$/i.test(locator);
+  };
+  const stepLocatorQuality = (step: any): number => {
+    const primary = step?.locator?.primary;
+    const structured = step?.structuredLocator || step?.locator?.structuredLocator || primary?.structuredLocator;
+    return [
+      isConcreteLocator(primary?.value) ? 2 : 0,
+      isConcreteLocator(primary?.playwright) ? 2 : 0,
+      isConcreteLocator(step?.selector) ? 2 : 0,
+      structured && (structured.strategy || structured.value || structured.name || structured.role) ? 3 : 0,
+      ...(Array.isArray(step?.locator?.alternatives)
+        ? step.locator.alternatives.map((alternative: any) => isConcreteLocator(alternative?.value) ? 1 : 0)
+        : [])
+    ].reduce((total, quality) => total + quality, 0);
+  };
+  const mergeFlowSteps = (current: any[] = [], backup: any[] = []): any[] => {
+    if (current.length !== backup.length) return backup.length > current.length ? backup : current;
+
+    return current.map((step, index) => {
+      const backupStep = step?.id
+        ? backup.find(candidate => candidate?.id === step.id) || backup[index]
+        : backup[index];
+      if (!backupStep || stepLocatorQuality(backupStep) <= stepLocatorQuality(step)) return step;
+
+      return {
+        ...step,
+        locator: backupStep.locator || step.locator,
+        structuredLocator: backupStep.structuredLocator || step.structuredLocator,
+        scopedLocator: backupStep.scopedLocator || step.scopedLocator,
+        selector: backupStep.selector || step.selector
+      };
+    });
+  };
 
   // 1. Index firestore flows
   firestoreFlows.forEach(f => {
@@ -1008,9 +1045,7 @@ export const mergeRecordedFlowsWithBackup = (
     if (!existing) {
       flowMap.set(bf.id, bf);
     } else {
-      const existingStepsCount = Array.isArray(existing.steps) ? existing.steps.length : 0;
-      const backupStepsCount = Array.isArray(bf.steps) ? bf.steps.length : 0;
-      const mergedSteps = backupStepsCount >= existingStepsCount ? (bf.steps || []) : (existing.steps || []);
+      const mergedSteps = mergeFlowSteps(existing.steps || [], bf.steps || []);
       const mergedScriptFiles = mergeScriptFiles(existing.scriptFiles || [], bf.scriptFiles || []);
       const currentGeneratedProject = existing.generatedProject || {};
       const backupGeneratedProject = bf.generatedProject || {};

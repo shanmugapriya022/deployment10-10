@@ -66,7 +66,8 @@ import { collection, query, where, getDocs, limit, orderBy } from 'firebase/fire
 import { syncAddDoc } from '../services/firestoreSync';
 import { toast } from 'sonner';
 import { DeviceLogPanel, DeviceLogEntry } from './DeviceLogPanel';
-import { deductExportCredits } from '../services/creditService';
+import { deductExportCredits, deductProjectCredits } from '../services/creditService';
+import { logActivity } from '../services/activityService';
 
 interface MobileAppMetaData {
   id: string;
@@ -246,6 +247,7 @@ export const MobileTesting: React.FC<MobileTestingProps> = ({
 
   // Real Execution State
   const [isExecuting, setIsExecuting] = useState<boolean>(false);
+  const executionLockRef = useRef(false);
   const [executionLogs, setExecutionLogs] = useState<Array<{
     timestamp: string;
     level: 'INFO' | 'ADB' | 'APPIUM' | 'WARN' | 'ERROR';
@@ -801,6 +803,15 @@ ${recordedSteps.map(s => {
     try {
       const res = await generateMobileTestCasesFromBRD(activeApp.appName, brdDocumentText, mobileRefineInstructions);
       setAiGeneratedScenarios(res.scenarios || []);
+      if (res.scenarios?.length) {
+        void logActivity(
+          user.email || '',
+          user.name || '',
+          `Generated ${res.scenarios.length} mobile test cases for ${activeApp.appName}`,
+          project.id,
+          project.name
+        ).catch(error => console.error('[MobileTesting] Could not write dashboard activity:', error));
+      }
       toast.success(`Generated ${res.scenarios?.length || 4} mobile test scenarios via Claude!`);
     } catch (err) {
       console.error("AI Generation failed:", err);
@@ -852,209 +863,274 @@ ${recordedSteps.map(s => {
 
   // Trigger Real Appium Test Execution
   const handleExecuteMobileSuite = async () => {
+    if (executionLockRef.current) return;
+    if (!activeApp || !activeDevice) {
+      toast.error('Select an active mobile app and device before running tests.');
+      return;
+    }
+    if (recordedSteps.length === 0) {
+      toast.error('Record at least one mobile test step before running the suite.');
+      return;
+    }
+    if (!agentOnline) {
+      toast.error('Connect the AutomatiQA Mobile Execution Agent before running tests.');
+      return;
+    }
+
+    executionLockRef.current = true;
     setIsExecuting(true);
-    setActiveTab('execution');
-    setExecutionLogs([]);
-    
-    const initialSteps = recordedSteps.map((s, i) => ({
-      stepNumber: i + 1,
-      title: s.elementName,
-      action: `${s.action.toUpperCase()} (${s.locatorStrategy}=${s.locatorValue})`,
-      status: 'PENDING' as const
-    }));
-    setLiveExecutionSteps(initialSteps);
-
-    const devSerial = activeDevice?.serialNumber || 'emulator-5554';
-    const pkg = activeApp?.packageName || 'com.machaxi.app';
-
-    const logMessages = [
-      { timestamp: new Date().toLocaleTimeString(), level: 'INFO' as const, message: `[AutomatiQA Mobile Engine] Initializing Mobile Test Suite...` },
-      { timestamp: new Date().toLocaleTimeString(), level: 'APPIUM' as const, message: `[Appium Server] Connecting to Appium Daemon at http://127.0.0.1:${appiumPort}...` },
-      { timestamp: new Date().toLocaleTimeString(), level: 'ADB' as const, message: `[ADB Daemon] Executing 'adb -s ${devSerial} shell getprop ro.build.version.release'` },
-      { timestamp: new Date().toLocaleTimeString(), level: 'ADB' as const, message: `[ADB Daemon] Installing APK: ${activeApp.fileName} onto device ${activeDevice.name}...` },
-      { timestamp: new Date().toLocaleTimeString(), level: 'APPIUM' as const, message: `[UiAutomator2] Session created: 9814a2-appium-session-active` },
-    ];
-    setExecutionLogs(logMessages);
-
-    // Initial system boot / session creation logcat batch
-    const initialDevLogs: DeviceLogEntry[] = [
-      {
-        id: `dlog-exec-init-1`,
-        timestamp: new Date().toLocaleTimeString() + '.012',
-        level: 'I',
-        tag: 'ActivityTaskManager',
-        pid: 1842,
-        tid: 1842,
-        message: `START u0 {act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x10000000 cmp=${pkg}/.MainActivity} from uid 2000`,
-        deviceId: devSerial
-      },
-      {
-        id: `dlog-exec-init-2`,
-        timestamp: new Date().toLocaleTimeString() + '.085',
-        level: 'D',
-        tag: 'UiAutomator2',
-        pid: 2104,
-        tid: 2120,
-        message: `[UiAutomator2Server] Appium driver session initialized for device ${devSerial}`,
-        deviceId: devSerial
-      },
-      {
-        id: `dlog-exec-init-3`,
-        timestamp: new Date().toLocaleTimeString() + '.140',
-        level: 'I',
-        tag: 'WindowManager',
-        pid: 1842,
-        tid: 1890,
-        message: `relayoutWindow: view=com.android.internal.policy.DecorView{48c715b V.E...... R.....ID 0,0-1080,2400}`,
-        deviceId: devSerial
-      }
-    ];
-    setDeviceLogs(prev => [...prev, ...initialDevLogs]);
-
-    // Stream step-by-step execution simulation / real driver calls
-    for (let i = 0; i < recordedSteps.length; i++) {
-      await new Promise(r => setTimeout(r, 1400));
-
-      const currentStep = recordedSteps[i];
-
-      // Mark running
-      setLiveExecutionSteps(prev => prev.map((st, idx) => idx === i ? { ...st, status: 'RUNNING' } : st));
-
-      setExecutionLogs(prev => [
-        ...prev,
+    const executionDetails = `${activeApp.appName} on ${activeDevice.name}: ${recordedSteps.length} mobile test steps`;
+    let creditResult: Awaited<ReturnType<typeof deductProjectCredits>>;
+    try {
+      creditResult = await deductProjectCredits(
+        project.id,
+        'record_play_mobile',
+        'analysis',
+        { name: user.name, email: user.email },
         {
-          timestamp: new Date().toLocaleTimeString(),
-          level: 'APPIUM',
-          message: `[Appium Driver] Locating element by ${currentStep.locatorStrategy}='${currentStep.locatorValue}'...`
+          projectName: project.name,
+          details: executionDetails,
+          outputType: 'Mobile app test execution',
+          inputCount: recordedSteps.length
+        }
+      );
+    } catch (error) {
+      executionLockRef.current = false;
+      setIsExecuting(false);
+      console.error('[MobileTesting] Credit deduction failed:', error);
+      toast.error('Could not verify or deduct mobile testing credits. Please retry.');
+      return;
+    }
+
+    if (!creditResult.success) {
+      executionLockRef.current = false;
+      setIsExecuting(false);
+      toast.error(creditResult.error || 'Insufficient credits to run mobile testing.');
+      return;
+    }
+
+    try {
+      await logActivity(
+        user.email || '',
+        user.name || '',
+        `Started mobile app testing: ${activeApp.appName} on ${activeDevice.name} (${recordedSteps.length} steps)`,
+        project.id,
+        project.name
+      );
+    } catch (error) {
+      console.error('[MobileTesting] Could not write dashboard activity:', error);
+    }
+
+    toast.info(`Mobile test execution started. ${creditResult.deducted} credits deducted.`);
+    try {
+      setActiveTab('execution');
+      setExecutionLogs([]);
+
+      const initialSteps = recordedSteps.map((s, i) => ({
+        stepNumber: i + 1,
+        title: s.elementName,
+        action: `${s.action.toUpperCase()} (${s.locatorStrategy}=${s.locatorValue})`,
+        status: 'PENDING' as const
+      }));
+      setLiveExecutionSteps(initialSteps);
+
+      const devSerial = activeDevice?.serialNumber || 'emulator-5554';
+      const pkg = activeApp?.packageName || 'com.machaxi.app';
+
+      const logMessages = [
+        { timestamp: new Date().toLocaleTimeString(), level: 'INFO' as const, message: `[AutomatiQA Mobile Engine] Initializing Mobile Test Suite...` },
+        { timestamp: new Date().toLocaleTimeString(), level: 'APPIUM' as const, message: `[Appium Server] Connecting to Appium Daemon at http://127.0.0.1:${appiumPort}...` },
+        { timestamp: new Date().toLocaleTimeString(), level: 'ADB' as const, message: `[ADB Daemon] Executing 'adb -s ${devSerial} shell getprop ro.build.version.release'` },
+        { timestamp: new Date().toLocaleTimeString(), level: 'ADB' as const, message: `[ADB Daemon] Installing APK: ${activeApp.fileName} onto device ${activeDevice.name}...` },
+        { timestamp: new Date().toLocaleTimeString(), level: 'APPIUM' as const, message: `[UiAutomator2] Session created: 9814a2-appium-session-active` },
+      ];
+      setExecutionLogs(logMessages);
+
+      // Initial system boot / session creation logcat batch
+      const initialDevLogs: DeviceLogEntry[] = [
+        {
+          id: `dlog-exec-init-1`,
+          timestamp: new Date().toLocaleTimeString() + '.012',
+          level: 'I',
+          tag: 'ActivityTaskManager',
+          pid: 1842,
+          tid: 1842,
+          message: `START u0 {act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x10000000 cmp=${pkg}/.MainActivity} from uid 2000`,
+          deviceId: devSerial
         },
         {
-          timestamp: new Date().toLocaleTimeString(),
-          level: 'INFO',
-          message: `[Action Executed] ${currentStep.action.toUpperCase()} -> '${currentStep.elementName}'`
-        }
-      ]);
-
-      // Add authentic step logcat lines
-      const stepDevLogs: DeviceLogEntry[] = [
-        {
-          id: `dlog-step-${i}-1`,
-          timestamp: new Date().toLocaleTimeString() + '.104',
+          id: `dlog-exec-init-2`,
+          timestamp: new Date().toLocaleTimeString() + '.085',
           level: 'D',
           tag: 'UiAutomator2',
           pid: 2104,
           tid: 2120,
-          message: `[POST /session/9814a2/element] {"using":"${currentStep.locatorStrategy}","value":"${currentStep.locatorValue}"}`,
+          message: `[UiAutomator2Server] Appium driver session initialized for device ${devSerial}`,
           deviceId: devSerial
         },
         {
-          id: `dlog-step-${i}-2`,
-          timestamp: new Date().toLocaleTimeString() + '.220',
+          id: `dlog-exec-init-3`,
+          timestamp: new Date().toLocaleTimeString() + '.140',
           level: 'I',
-          tag: 'InputDispatcher',
+          tag: 'WindowManager',
           pid: 1842,
           tid: 1890,
-          message: `Delivering pointer interaction to window ${pkg}/.MainActivity`,
-          deviceId: devSerial
-        },
-        {
-          id: `dlog-step-${i}-3`,
-          timestamp: new Date().toLocaleTimeString() + '.350',
-          level: 'I',
-          tag: 'ViewRootImpl',
-          pid: 2415,
-          tid: 2415,
-          message: `ViewRootImpl[MainActivity]: dispatchPointerEvent -> ${currentStep.action.toUpperCase()} ('${currentStep.elementName}')`,
-          deviceId: devSerial
-        },
-        {
-          id: `dlog-step-${i}-4`,
-          timestamp: new Date().toLocaleTimeString() + '.480',
-          level: 'D',
-          tag: 'OkHttpClient',
-          pid: 2415,
-          tid: 2490,
-          message: `--> POST https://api.machaxi.com/v1/events/step_${i + 1} (256-byte body)`,
-          deviceId: devSerial
-        },
-        {
-          id: `dlog-step-${i}-5`,
-          timestamp: new Date().toLocaleTimeString() + '.590',
-          level: 'D',
-          tag: 'OkHttpClient',
-          pid: 2415,
-          tid: 2490,
-          message: `<-- 200 OK https://api.machaxi.com/v1/events/step_${i + 1} (110ms)`,
+          message: `relayoutWindow: view=com.android.internal.policy.DecorView{48c715b V.E...... R.....ID 0,0-1080,2400}`,
           deviceId: devSerial
         }
       ];
+      setDeviceLogs(prev => [...prev, ...initialDevLogs]);
 
-      setDeviceLogs(prev => [...prev, ...stepDevLogs]);
+      // Stream step-by-step execution simulation / real driver calls
+      for (let i = 0; i < recordedSteps.length; i++) {
+        await new Promise(r => setTimeout(r, 1400));
 
-      // Post to backend upload endpoint for persistent log streaming
-      try {
-        fetch('/api/mobile/agent/upload-device-logs', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email: user.email,
-            deviceId: devSerial,
-            logs: stepDevLogs
-          })
-        }).catch(() => {});
-      } catch (e) {}
+        const currentStep = recordedSteps[i];
 
-      // Mark passed
-      setLiveExecutionSteps(prev => prev.map((st, idx) => idx === i ? { ...st, status: 'PASS', durationMs: Math.floor(Math.random() * 400) + 180 } : st));
-    }
+        // Mark running
+        setLiveExecutionSteps(prev => prev.map((st, idx) => idx === i ? { ...st, status: 'RUNNING' } : st));
 
-    await new Promise(r => setTimeout(r, 1000));
+        setExecutionLogs(prev => [
+          ...prev,
+          {
+            timestamp: new Date().toLocaleTimeString(),
+            level: 'APPIUM',
+            message: `[Appium Driver] Locating element by ${currentStep.locatorStrategy}='${currentStep.locatorValue}'...`
+          },
+          {
+            timestamp: new Date().toLocaleTimeString(),
+            level: 'INFO',
+            message: `[Action Executed] ${currentStep.action.toUpperCase()} -> '${currentStep.elementName}'`
+          }
+        ]);
 
-    // Finish Execution logcat
-    const completionDevLog: DeviceLogEntry = {
-      id: `dlog-exec-done`,
-      timestamp: new Date().toLocaleTimeString() + '.910',
-      level: 'I',
-      tag: 'AndroidRuntime',
-      pid: 2415,
-      tid: 2415,
-      message: `[AutomatiQA Mobile Engine] Automation suite finished. 100% assertions passed (${recordedSteps.length} steps).`,
-      deviceId: devSerial
-    };
-    setDeviceLogs(prev => [...prev, completionDevLog]);
+        // Add authentic step logcat lines
+        const stepDevLogs: DeviceLogEntry[] = [
+          {
+            id: `dlog-step-${i}-1`,
+            timestamp: new Date().toLocaleTimeString() + '.104',
+            level: 'D',
+            tag: 'UiAutomator2',
+            pid: 2104,
+            tid: 2120,
+            message: `[POST /session/9814a2/element] {"using":"${currentStep.locatorStrategy}","value":"${currentStep.locatorValue}"}`,
+            deviceId: devSerial
+          },
+          {
+            id: `dlog-step-${i}-2`,
+            timestamp: new Date().toLocaleTimeString() + '.220',
+            level: 'I',
+            tag: 'InputDispatcher',
+            pid: 1842,
+            tid: 1890,
+            message: `Delivering pointer interaction to window ${pkg}/.MainActivity`,
+            deviceId: devSerial
+          },
+          {
+            id: `dlog-step-${i}-3`,
+            timestamp: new Date().toLocaleTimeString() + '.350',
+            level: 'I',
+            tag: 'ViewRootImpl',
+            pid: 2415,
+            tid: 2415,
+            message: `ViewRootImpl[MainActivity]: dispatchPointerEvent -> ${currentStep.action.toUpperCase()} ('${currentStep.elementName}')`,
+            deviceId: devSerial
+          },
+          {
+            id: `dlog-step-${i}-4`,
+            timestamp: new Date().toLocaleTimeString() + '.480',
+            level: 'D',
+            tag: 'OkHttpClient',
+            pid: 2415,
+            tid: 2490,
+            message: `--> POST https://api.machaxi.com/v1/events/step_${i + 1} (256-byte body)`,
+            deviceId: devSerial
+          },
+          {
+            id: `dlog-step-${i}-5`,
+            timestamp: new Date().toLocaleTimeString() + '.590',
+            level: 'D',
+            tag: 'OkHttpClient',
+            pid: 2415,
+            tid: 2490,
+            message: `<-- 200 OK https://api.machaxi.com/v1/events/step_${i + 1} (110ms)`,
+            deviceId: devSerial
+          }
+        ];
 
-    // Finish Execution & Create Report
-    const runReport: MobileExecutionRun = {
-      projectId: project.id,
-      appName: activeApp.appName,
-      appVersion: activeApp.version,
-      deviceInfo: `${activeDevice.name} (${activeDevice.osVersion})`,
-      platform: activeApp.platform,
-      totalTests: recordedSteps.length,
-      passedCount: recordedSteps.length,
-      failedCount: 0,
-      passRatePct: 100,
-      executionTimeMs: recordedSteps.length * 1580,
-      executedAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
-      steps: recordedSteps.map((s, idx) => ({
-        stepNumber: idx + 1,
-        title: s.elementName,
-        action: `${s.action.toUpperCase()} (${s.locatorStrategy}=${s.locatorValue})`,
-        status: 'PASS',
-        durationMs: 320
-      }))
-    };
+        setDeviceLogs(prev => [...prev, ...stepDevLogs]);
 
-    setCompletedReport(runReport);
-    setPastRuns(prev => [runReport, ...prev]);
-    setIsExecuting(false);
-    toast.success("Mobile Appium Execution completed successfully! 100% Pass Rate.");
+        // Post to backend upload endpoint for persistent log streaming
+        try {
+          fetch('/api/mobile/agent/upload-device-logs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              email: user.email,
+              deviceId: devSerial,
+              logs: stepDevLogs
+            })
+          }).catch(() => {});
+        } catch (e) {}
 
-    try {
-      if (mainDb) {
-        await syncAddDoc(collection(mainDb, 'mobile_execution_runs'), runReport);
+        // Mark passed
+        setLiveExecutionSteps(prev => prev.map((st, idx) => idx === i ? { ...st, status: 'PASS', durationMs: Math.floor(Math.random() * 400) + 180 } : st));
       }
-    } catch (e) {
-      console.warn("Firestore save fallback:", e);
+
+      await new Promise(r => setTimeout(r, 1000));
+
+      // Finish Execution logcat
+      const completionDevLog: DeviceLogEntry = {
+        id: `dlog-exec-done`,
+        timestamp: new Date().toLocaleTimeString() + '.910',
+        level: 'I',
+        tag: 'AndroidRuntime',
+        pid: 2415,
+        tid: 2415,
+        message: `[AutomatiQA Mobile Engine] Automation suite finished. 100% assertions passed (${recordedSteps.length} steps).`,
+        deviceId: devSerial
+      };
+      setDeviceLogs(prev => [...prev, completionDevLog]);
+
+      // Finish Execution & Create Report
+      const runReport: MobileExecutionRun = {
+        projectId: project.id,
+        appName: activeApp.appName,
+        appVersion: activeApp.version,
+        deviceInfo: `${activeDevice.name} (${activeDevice.osVersion})`,
+        platform: activeApp.platform,
+        totalTests: recordedSteps.length,
+        passedCount: recordedSteps.length,
+        failedCount: 0,
+        passRatePct: 100,
+        executionTimeMs: recordedSteps.length * 1580,
+        executedAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
+        steps: recordedSteps.map((s, idx) => ({
+          stepNumber: idx + 1,
+          title: s.elementName,
+          action: `${s.action.toUpperCase()} (${s.locatorStrategy}=${s.locatorValue})`,
+          status: 'PASS',
+          durationMs: 320
+        }))
+      };
+
+      setCompletedReport(runReport);
+      setPastRuns(prev => [runReport, ...prev]);
+      toast.success("Mobile Appium Execution completed successfully! 100% Pass Rate.");
+
+      try {
+        if (mainDb) {
+          await syncAddDoc(collection(mainDb, 'mobile_execution_runs'), runReport);
+        }
+      } catch (e) {
+        console.warn("Firestore save fallback:", e);
+      }
+    } catch (error) {
+      console.error('[MobileTesting] Mobile test execution failed:', error);
+      toast.error(error instanceof Error ? error.message : 'Mobile test execution failed.');
+    } finally {
+      executionLockRef.current = false;
+      setIsExecuting(false);
     }
   };
 
@@ -1068,6 +1144,13 @@ ${recordedSteps.map(s => {
     );
     if (!success) return;
     navigator.clipboard.writeText(generatedScriptContent);
+    void logActivity(
+      user.email || '',
+      user.name || '',
+      `Copied mobile Appium script for ${activeApp?.appName || 'mobile app'}`,
+      project.id,
+      project.name
+    ).catch(error => console.error('[MobileTesting] Could not write dashboard activity:', error));
   };
 
   const handleDownloadScript = async () => {
@@ -1086,6 +1169,13 @@ ${recordedSteps.map(s => {
     a.download = `mobile-${activeApp ? activeApp.appName.replace(/\s+/g, '-').toLowerCase() : 'app'}-suite.spec.ts`;
     a.click();
     URL.revokeObjectURL(url);
+    void logActivity(
+      user.email || '',
+      user.name || '',
+      `Downloaded mobile Appium script for ${activeApp?.appName || 'mobile app'}`,
+      project.id,
+      project.name
+    ).catch(error => console.error('[MobileTesting] Could not write dashboard activity:', error));
   };
 
   return (

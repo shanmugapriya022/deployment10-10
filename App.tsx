@@ -1650,7 +1650,7 @@ const App: React.FC = () => {
     }
   }, [isSuperAdmin, activeTab]);
 
-  const updateProject = async (updatedProject: Project, options?: { immediate?: boolean }): Promise<void> => {
+  const updateProject = async (updatedProject: Project, options?: { immediate?: boolean; localOnly?: boolean }): Promise<void> => {
     if (!updatedProject?.id) return;
 
     // Merge all project repositories against the last durable copy before
@@ -1701,6 +1701,8 @@ const App: React.FC = () => {
     setProjects(prevProjects => 
       prevProjects.map(p => p.id === cleanUpdatedProject.id ? { ...cleanUpdatedProject } : p)
     );
+
+    if (options?.localOnly) return;
 
     // Trigger Firestore update; if immediate is requested, await it directly
     try {

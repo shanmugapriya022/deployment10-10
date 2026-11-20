@@ -1477,13 +1477,18 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
     return Array.from(scriptsById.values());
   }, [allArtifacts, unsavedScripts]);
 
-  const getProjectScriptFolderName = (script: AutomationScript) => {
+  const getProjectScriptFolderName = useCallback((script: AutomationScript) => {
     const assignedName = script.folderName?.trim();
     if (assignedName) return assignedName;
     const assignedFolder = project.automationFolders?.find(folder => folder.id === script.folderId);
     if (assignedFolder?.name?.trim()) return assignedFolder.name.trim();
     return script.isImported || script.id.startsWith('import-') ? 'Imported Scripts' : 'General Scripts';
-  };
+  }, [project.automationFolders]);
+
+  const getMergeScriptFolderName = useCallback((script: AutomationScript) => {
+    const assignedFolder = project.automationFolders?.find(folder => folder.id === script.folderId);
+    return assignedFolder?.name?.trim() || getProjectScriptFolderName(script);
+  }, [getProjectScriptFolderName, project.automationFolders]);
 
   const getMergeFiles = useCallback((script: AutomationScript): AutomationScriptFile[] => {
     let sourceFiles = script.files && script.files.length > 0 ? script.files : [];
@@ -1548,7 +1553,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
       .filter(script => script.id !== mergeScriptsModal?.targetScript.id)
       .filter(script => getMergeFiles(script).length > 0)
       .forEach(script => {
-        const name = getProjectScriptFolderName(script);
+        const name = getMergeScriptFolderName(script);
         const key = name.toLowerCase();
         const existing = folderMap.get(key);
         if (existing) {
@@ -1559,7 +1564,7 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
       });
 
     return Array.from(folderMap.values()).sort((a, b) => a.name.localeCompare(b.name));
-  }, [getMergeFiles, mergeScriptsModal?.targetScript.id, mergeableScripts, project.automationFolders]);
+  }, [getMergeFiles, getMergeScriptFolderName, mergeScriptsModal?.targetScript.id, mergeableScripts]);
 
   const availableMergeFolders = useMemo(() => {
     if (!mergeScriptsModal || mergeScriptsModal.selectedFolderName) return [];
@@ -1571,9 +1576,9 @@ export const ScriptGenerator: React.FC<ScriptGeneratorProps> = ({
     if (!mergeScriptsModal?.selectedFolderName) return [];
     return mergeableScripts.filter(script =>
       script.id !== mergeScriptsModal.targetScript.id &&
-      getProjectScriptFolderName(script).toLowerCase() === mergeScriptsModal.selectedFolderName?.toLowerCase()
+      getMergeScriptFolderName(script).toLowerCase() === mergeScriptsModal.selectedFolderName?.toLowerCase()
     );
-  }, [mergeableScripts, mergeScriptsModal, project.automationFolders]);
+  }, [getMergeScriptFolderName, mergeableScripts, mergeScriptsModal]);
 
   const availableMergeFiles = useMemo(() => {
     const query = mergeScriptsModal?.searchQuery.trim().toLowerCase() || '';

@@ -965,6 +965,7 @@ async function startStreamingAndCommandPolling() {
 
           let cmd = '';
           let locatorAttr = null;
+          let locatorPromise = null;
 
           if (action === 'click' || action === 'tap' || action === 'double_tap' || action === 'long_press') {
             cmd = `adb -s ${actionDeviceId} shell input tap ${params.x} ${params.y}`;
@@ -1044,16 +1045,11 @@ async function startStreamingAndCommandPolling() {
           }
 
           if (cmd) {
+            const commandPromise = runCmd(cmd);
             if (locatorPromise) {
               locatorAttr = await locatorPromise.catch(() => null);
             }
-            await runCmd(cmd);
-
-            // Resolve the node after the ADB command has already been sent. The
-            // promise started before the tap, so it describes the tapped screen.
-            if (locatorPromise) {
-              locatorAttr = await locatorPromise.catch(() => null);
-            }
+            await commandPromise;
 
             await postJson(`${serverUrl}/api/device-agent/upload-logs`, {
               email: userEmail,

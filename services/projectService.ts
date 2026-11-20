@@ -780,10 +780,8 @@ export const pruneProjectData = (project: any): any => {
       if (obj.startsWith('data:')) {
         return obj.length > maxLen ? '' : obj;
       }
-      // Never strip scripts, code files, or persistent URLs unless excessively huge
-      if (obj.length > 100000) {
-        return obj.substring(0, 100000);
-      }
+      // Never strip scripts or code. Heavy binary data is handled through
+      // data-URL cleanup above; ordinary text must remain complete.
       return obj;
     }
     if (Array.isArray(obj)) {
@@ -851,9 +849,6 @@ export const pruneProjectData = (project: any): any => {
       }
       if (typeof flow.posterUrl === 'string' && flow.posterUrl.startsWith('data:')) {
         flow.posterUrl = '';
-      }
-      if (Array.isArray(flow.scriptFiles) && flow.scriptFiles.length > 0 && (flow.generatedScript || '').length > 500) {
-        flow.generatedScript = `/* Generated script with ${flow.scriptFiles.length} files. Preserved in scriptFiles array. */`;
       }
       if (Array.isArray(flow.steps)) {
         flow.steps.forEach((st: any) => {
@@ -1018,24 +1013,9 @@ export const pruneProjectData = (project: any): any => {
   currentSize = estimateSize(cloned);
   if (currentSize < LIMIT) return cloned;
 
-  // If still over limit, trim very long script file contents (> 20,000 chars) while preserving core code structure
-  if (cloned.automationScripts && Array.isArray(cloned.automationScripts)) {
-    cloned.automationScripts.forEach((s: any) => {
-      if (Array.isArray(s.files) && s.files.length > 0) {
-        s.files = s.files.map((f: any) => {
-          if (f && typeof f.content === 'string' && f.content.length > 20000) {
-            return {
-              ...f,
-              content: f.content.substring(0, 20000) + '\n\n// ... [content preserved in local storage / server disk]'
-            };
-          }
-          return f;
-        });
-      }
-    });
-    currentSize = estimateSize(cloned);
-    if (currentSize < LIMIT) return cloned;
-  }
+  // Script file contents are intentionally preserved in full. Oversized
+  // projects are recovered from the durable project backup rather than being
+  // partially rewritten with a visible truncation marker.
 
   // 10. SANITIZE UI TESTING REPORTS & ARTIFACTS FOR FIRESTORE
   // Converts large inline data URLs into lightweight ui_screenshot_id references that resolve from Firestore ui_screenshots collection.
@@ -1190,14 +1170,18 @@ export const pruneProjectData = (project: any): any => {
     // document size limit. Their durable backup is written before pruning, and
     // the compact recovery document below preserves metadata for every entry.
 
-    // 12. ENFORCEABLE HARD CEILING: Truncate any long strings (> 1000 chars) anywhere in the document
-    const hardTrimStrings = (o: any, maxLen = 1000): any => {
+    // 12. ENFORCEABLE HARD CEILING: Trim ordinary text fields while preserving
+    // script and code payloads verbatim for UI and script previews.
+    const scriptPayloadKey = (key: string) =>
+      /(?:script|code|content|source|markdown|jmx|generated|testcase)/i.test(key);
+    const hardTrimStrings = (o: any, maxLen = 1000, parentKey = ''): any => {
       if (!o) return o;
       if (typeof o === 'string') {
+        if (scriptPayloadKey(parentKey)) return o;
         return o.length > maxLen ? o.substring(0, maxLen) + '... [trimmed for Firestore]' : o;
       }
       if (Array.isArray(o)) {
-        return o.map(i => hardTrimStrings(i, maxLen));
+        return o.map(i => hardTrimStrings(i, maxLen, parentKey));
       }
       if (typeof o === 'object') {
         const cname = o.constructor?.name;
@@ -1213,7 +1197,7 @@ export const pruneProjectData = (project: any): any => {
           return o;
         }
         for (const k of Object.keys(o)) {
-          o[k] = hardTrimStrings(o[k], maxLen);
+          o[k] = hardTrimStrings(o[k], maxLen, k);
         }
       }
       return o;
@@ -1266,12 +1250,8 @@ export const pruneProjectDataUltra = (project: any): any => {
     ultra.automationScripts.forEach((s: any) => {
       s.evidence = '';
       s.contextImages = [];
-      if (Array.isArray(s.files)) {
-        s.files = s.files.map((f: any) => ({
-          ...f,
-          content: typeof f.content === 'string' && f.content.length > 3000 ? f.content.substring(0, 3000) + '... (trimmed)' : f.content
-        }));
-      }
+      // Full file contents are kept for script previews and downloads.
+      // The durable backup remains the authoritative payload.
     });
   }
   if (ultra.uploadVideoFlows && Array.isArray(ultra.uploadVideoFlows)) {
@@ -1462,7 +1442,8 @@ const commitScenarioOperations = async (
 export const saveScenariosToFirestore = async (
   projectId: string,
   scenarios: TestScenario[],
-  deletedItemIds: unknown[] = []
+  deletedItemIds: unknown[] = [],
+  options?: { partial?: boolean }
 ): Promise<void> => {
   if (!projectId) return;
 
@@ -1474,9 +1455,14 @@ export const saveScenariosToFirestore = async (
   // Scenario documents are long-lived records. Read the current version first
   // so a stale client snapshot with blank text or an empty folder member list
   // cannot erase the last persisted values.
-  const existingRecords = await getDocs(recordsRef);
+  const existingRecordSnapshots = options?.partial && deleted.size === 0
+    ? await Promise.all(scenarios
+      .filter(scenario => scenario?.id)
+      .map(scenario => getDoc(doc(recordsRef, encodeURIComponent(String(scenario.id))))))
+    : (await getDocs(recordsRef)).docs;
   const existingById = new Map<string, Record<string, any>>();
-  existingRecords.docs.forEach(snapshot => {
+  existingRecordSnapshots.forEach(snapshot => {
+    if (!snapshot.exists()) return;
     const record = snapshot.data() as Record<string, any>;
     const id = String(record.id || snapshot.id);
     existingById.set(id, record);
@@ -1517,7 +1503,7 @@ export const saveScenariosToFirestore = async (
     );
     const savedMembers = Array.isArray(existing.memberScenarioIds) ? existing.memberScenarioIds : [];
     const incomingMembers = Array.isArray(scenarioData.memberScenarioIds) ? scenarioData.memberScenarioIds : [];
-    const memberScenarioIds = incomingMembers.length > 0
+    const memberScenarioIds = Array.isArray(scenarioData.memberScenarioIds)
       ? incomingMembers
       : savedMembers.filter(memberId => !deleted.has(String(memberId).trim().toLowerCase()));
     const durableScenarioData = {
@@ -1582,7 +1568,7 @@ export const saveScenariosToFirestore = async (
   if (deleted.size > 0) {
     const existingCases = await getDocs(casesRef);
     const existingFrames = await getDocs(framesRef);
-    existingRecords.docs.forEach(snapshot => {
+    existingRecordSnapshots.forEach(snapshot => {
       const record = snapshot.data();
       const id = String(record.id || snapshot.id);
       if (
@@ -1769,6 +1755,8 @@ export const updateProjectFirestore = async (projectId: string, data: any, optio
               const compactPerformanceScripts = (finalizedData.performanceScripts || []).map((script: any) => ({
                 id: script.id,
                 name: script.name,
+                artifactType: script.artifactType,
+                analysisReportUrl: script.analysisReportUrl,
                 title: script.title,
                 type: script.type,
                 folderId: script.folderId,

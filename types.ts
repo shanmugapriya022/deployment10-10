@@ -253,6 +253,7 @@ export interface DataDrivenTestData {
 export interface PerformanceScript {
   id: string;
   name: string;
+  artifactType?: 'jmx' | 'analysis_report' | 'graph_report';
   scenarios: any[];
   jmxContent: string;
   csvData?: string;

@@ -12240,7 +12240,8 @@ async function recordTokenLogServer(params: {
 
     const featureName = 'Automation - Record and play - Mobile app';
     const projectTarget = userContext?.projectId || userContext?.project || appName || 'Mobile Testing';
-    await syncProjectPlanFromFirestore(projectTarget, userContext?.project);
+    const projectName = userContext?.projectName || userContext?.project || appName || 'Mobile Testing';
+    await syncProjectPlanFromFirestore(projectTarget, projectName);
     const creditCheck = checkProjectCreditsServer(projectTarget, featureName);
     if (!creditCheck.allowed) {
       return res.status(403).json({
@@ -12275,7 +12276,8 @@ async function recordTokenLogServer(params: {
         userName: userContext?.name || 'Shanmugapriya',
         userEmail: userContext?.email || 'automatiqa@qaoncloud.com',
         workspace: userContext?.workspace || 'AutomatiQA Workspace',
-        projectName: appName || userContext?.project || 'Mobile Testing',
+        projectName,
+        projectId: userContext?.projectId,
         inputTokens,
         outputTokens,
         responseTimeSeconds: Number((executionTimeMs / 1000).toFixed(2)),
@@ -12308,7 +12310,8 @@ async function recordTokenLogServer(params: {
 
     const featureName = 'Automation - Record and play - Mobile app';
     const projectTarget = userContext?.projectId || userContext?.project || appName || 'Mobile Testing';
-    await syncProjectPlanFromFirestore(projectTarget, userContext?.project);
+    const projectName = userContext?.projectName || userContext?.project || appName || 'Mobile Testing';
+    await syncProjectPlanFromFirestore(projectTarget, projectName);
     const creditCheck = checkProjectCreditsServer(projectTarget, featureName);
     if (!creditCheck.allowed) {
       return res.status(403).json({
@@ -12338,7 +12341,8 @@ async function recordTokenLogServer(params: {
         userName: userContext?.name || 'Shanmugapriya',
         userEmail: userContext?.email || 'automatiqa@qaoncloud.com',
         workspace: userContext?.workspace || 'AutomatiQA Workspace',
-        projectName: appName || userContext?.project || 'Mobile Testing',
+        projectName,
+        projectId: userContext?.projectId,
         inputTokens,
         outputTokens,
         responseTimeSeconds: Number((executionTimeMs / 1000).toFixed(2)),

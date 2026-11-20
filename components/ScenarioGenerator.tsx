@@ -70,6 +70,18 @@ interface ScenarioGeneratorProps {
   onNavigateTab?: (tab: string) => void;
 }
 
+const URL_UI_CAPTURE_TIMEOUT_MS = 30_000;
+
+const captureUrlUi = async (url: string): Promise<any> => {
+  const response = await fetch('/api/capture-url-ui', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+    signal: AbortSignal.timeout(URL_UI_CAPTURE_TIMEOUT_MS)
+  });
+  return response.json();
+};
+
 const ScenarioGenerator: React.FC<ScenarioGeneratorProps> = ({ project, user, onUpdateProject, onRunFolder, onNavigateTab }) => {
   const [activeTab, setActiveTab] = useState<'text' | 'url' | 'doc'>('text');
   const [isJiraModalOpen, setIsJiraModalOpen] = useState(false);
@@ -301,6 +313,14 @@ interface LastInputDetails {
       (s.isFolder && (s.moduleName === 'AI SCENARIOS' || s.moduleName === 'AI Scenarios' || !s.moduleName))
     );
   }, [isApiTestingScenario]);
+
+  const isScenarioFolderNameTaken = (name: string): boolean => {
+    const normalizedName = name.trim().toLowerCase();
+    return scenarios.some(s =>
+      isScenarioFolder(s) &&
+      (s.title || '').trim().toLowerCase() === normalizedName
+    );
+  };
 
   // Helper to accurately determine if a scenario belongs to a folder
   const isMemberOfFolder = useCallback((mem: TestScenario, folder: TestScenario): boolean => {
@@ -893,12 +913,7 @@ interface LastInputDetails {
         if (appUrl.trim()) {
           try {
             toast.info(`Capturing and analyzing live UI elements from ${appUrl.trim()}...`);
-            const captureRes = await fetch('/api/capture-url-ui', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ url: appUrl.trim() })
-            });
-            const captureData = await captureRes.json();
+            const captureData = await captureUrlUi(appUrl.trim());
             if (captureData.success) {
               if (captureData.screenshot && generationScreenshots.length === 0) {
                 const capturedScreenshot = {
@@ -921,6 +936,9 @@ interface LastInputDetails {
             }
           } catch (captureErr) {
             console.warn('Global URL capture notice in ScenarioGenerator:', captureErr);
+            if ((captureErr as Error)?.name === 'TimeoutError') {
+              toast.warning('Live website capture timed out. Continuing with the URL and feature description.');
+            }
           }
         }
         const screenshotContext = generationScreenshots.length > 0
@@ -938,12 +956,7 @@ interface LastInputDetails {
         if (analysisUrl.trim()) {
           try {
             toast.info(`Capturing and analyzing live UI elements from ${analysisUrl.trim()}...`);
-            const captureRes = await fetch('/api/capture-url-ui', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ url: analysisUrl.trim() })
-            });
-            const captureData = await captureRes.json();
+            const captureData = await captureUrlUi(analysisUrl.trim());
             if (captureData.success) {
               if (captureData.screenshot && screenshots.length === 0) {
                 generationScreenshots = [{
@@ -970,6 +983,9 @@ interface LastInputDetails {
             }
           } catch (captureErr) {
             console.warn('URL capture notice in ScenarioGenerator:', captureErr);
+            if ((captureErr as Error)?.name === 'TimeoutError') {
+              toast.warning('Live website capture timed out. Continuing with the URL and feature description.');
+            }
           }
         }
 
@@ -1777,12 +1793,7 @@ interface LastInputDetails {
           return;
         }
 
-        const isDuplicate = scenarios.some(s => 
-          isScenarioFolder(s) && 
-          s.title.toLowerCase() === trimmedInlineName.toLowerCase()
-        );
-
-        if (isDuplicate) {
+        if (isScenarioFolderNameTaken(trimmedInlineName)) {
           setInlineFolderError('This folder name is already in use.');
           return;
         }
@@ -1946,12 +1957,7 @@ interface LastInputDetails {
           return;
         }
 
-        const isDuplicate = scenarios.some(s => 
-          isScenarioFolder(s) && 
-          s.title.toLowerCase() === trimmedInlineName.toLowerCase()
-        );
-
-        if (isDuplicate) {
+        if (isScenarioFolderNameTaken(trimmedInlineName)) {
           setInlineFolderError('This folder name is already in use.');
           return;
         }
@@ -3118,12 +3124,7 @@ interface LastInputDetails {
       return;
     }
 
-    const isDuplicate = scenarios.some(s => 
-      isScenarioFolder(s) && 
-      s.title.toLowerCase() === trimmedName.toLowerCase()
-    );
-
-    if (isDuplicate) {
+    if (isScenarioFolderNameTaken(trimmedName)) {
       setFolderError('This folder name is already in use. Please enter a different name to continue');
       return;
     }
@@ -3176,12 +3177,7 @@ interface LastInputDetails {
           return;
         }
 
-        const isDuplicate = scenarios.some(s => 
-          isScenarioFolder(s) && 
-          s.title.toLowerCase() === trimmedInlineName.toLowerCase()
-        );
-
-        if (isDuplicate) {
+        if (isScenarioFolderNameTaken(trimmedInlineName)) {
           setInlineFolderError('This folder name is already in use.');
           return;
         }
@@ -3619,7 +3615,13 @@ interface LastInputDetails {
             <div className="flex items-center gap-3">
               {!newlyGeneratedScenarios[0].saved ? (
                 <button
-                  onClick={() => setIsFolderSelectModalOpen(true)}
+                  onClick={() => {
+                    setShowCreateFolderInline(false);
+                    setInlineNewFolderName('');
+                    setInlineFolderError(null);
+                    setSelectedFolderIdForSave('');
+                    setIsFolderSelectModalOpen(true);
+                  }}
                   className="flex items-center gap-2.5 bg-indigo-600 text-white px-8 py-4 rounded-full font-black text-xs uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-lg active:scale-95"
                 >
                   <Save size={15} /> Save to Folder
@@ -5175,6 +5177,10 @@ interface LastInputDetails {
               <button 
                 onClick={() => {
                   setIsSaveConfirmModalOpen(false);
+                  setShowCreateFolderInline(false);
+                  setInlineNewFolderName('');
+                  setInlineFolderError(null);
+                  setSelectedFolderIdForSave('');
                   setIsFolderSelectModalOpen(true);
                 }} 
                 className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-indigo-700 shadow-xl shadow-indigo-100 active:scale-95 transition-all flex items-center justify-center gap-2"
@@ -5212,7 +5218,10 @@ interface LastInputDetails {
             <div className="space-y-6 flex-1 overflow-y-auto pr-1">
               <div className="flex items-center gap-6 border-b border-slate-100 pb-4 shrink-0">
                 <button 
-                  onClick={() => setShowCreateFolderInline(false)}
+                  onClick={() => {
+                    setShowCreateFolderInline(false);
+                    setInlineFolderError(null);
+                  }}
                   className={`flex-1 py-3 px-4 rounded-xl text-[10px] font-black uppercase tracking-widest border transition-all ${!showCreateFolderInline ? 'bg-indigo-50 border-indigo-200 text-indigo-700' : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50'}`}
                 >
                   Existing Folder
@@ -5275,7 +5284,10 @@ interface LastInputDetails {
                           <button
                             key={folder.id}
                             type="button"
-                            onClick={() => setSelectedFolderIdForSave(folder.id)}
+                            onClick={() => {
+                              setSelectedFolderIdForSave(folder.id);
+                              setInlineFolderError(null);
+                            }}
                             className={`w-full flex items-center justify-between p-4 rounded-2xl border text-left transition-all ${selectedFolderIdForSave === folder.id ? 'bg-indigo-50 border-indigo-400 text-indigo-950 font-black' : 'bg-white border-slate-100 hover:border-slate-200 text-slate-700 font-bold'}`}
                           >
                             <span className="text-xs uppercase tracking-tight break-all pr-2">{folder.title}</span>

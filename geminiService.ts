@@ -10228,7 +10228,8 @@ export async function generateMobileTestCasesFromBRD(appName: string, brdText: s
         name,
         email,
         workspace: 'AutomatiQA Workspace',
-        project: appName || 'Mobile Testing',
+        project: activeProjName || appName || 'Mobile Testing',
+        projectName: activeProjName || appName || 'Mobile Testing',
         projectId: (window as any).__automatiqa_active_project_id || localStorage.getItem('automatiqa_active_project_id') || ''
       };
     }
@@ -10329,7 +10330,8 @@ export async function generateAppiumScript(appName: string, steps: any[], platfo
         name,
         email,
         workspace: 'AutomatiQA Workspace',
-        project: appName || 'Mobile Testing',
+        project: activeProjName || appName || 'Mobile Testing',
+        projectName: activeProjName || appName || 'Mobile Testing',
         projectId: (window as any).__automatiqa_active_project_id || localStorage.getItem('automatiqa_active_project_id') || ''
       };
     }

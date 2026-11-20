@@ -87,7 +87,7 @@ import { canPerformActionLocal } from '../services/creditService';
 interface PerformanceTestingProps {
   project: Project;
   user: User;
-  onUpdateProject: (p: Project) => void;
+  onUpdateProject: (p: Project) => void | Promise<void>;
 }
 
 type PerformanceMetricType = 'hits' | 'latency' | 'threads' | 'success' | 'tps' | 'codes';
@@ -118,6 +118,7 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
   // Post-analysis report naming states
   const [isReportNamingModalOpen, setIsReportNamingModalOpen] = useState(false);
   const [reportArtifactLabel, setReportArtifactLabel] = useState('');
+  const [isSavingReport, setIsSavingReport] = useState(false);
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [scenarios, setScenarios] = useState<any[]>([]);
@@ -562,7 +563,7 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
   };
 
   const confirmSaveReport = async () => {
-    if (!analysisResult && graphData.length === 0) return;
+    if (isSavingReport || (!analysisResult && graphData.length === 0)) return;
     const finalReportName = reportArtifactLabel.trim();
     if (!finalReportName) {
       toast.error('Artifact Identifier cannot be empty.');
@@ -579,44 +580,49 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
       return;
     }
 
-    const reportId = `perf_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
-    let analysisReportUrl: string | undefined;
-    if (analysisResult) {
-      try {
-        analysisReportUrl = await savePerformanceAnalysisReport(
-          project.id,
-          reportId,
-          typeof analysisResult === 'string' ? analysisResult : JSON.stringify(analysisResult)
-        );
-      } catch (err) {
-        console.error('Failed to store shared Performance API report:', err);
-        toast.error('Could not save this report to shared storage. Please retry.');
-        return;
-      }
-    }
-
-    const newReport: PerformanceScript = {
-      id: reportId,
-      name: finalReportName,
-      scenarios: [], 
-      jmxContent: '', 
-      analysisReport: analysisResult ? JSON.stringify(analysisResult) : undefined, 
-      analysisReportUrl,
-      trendData: graphData.length > 0 ? JSON.stringify(graphData) : undefined,
-      createdAt: new Date().toISOString()
-    };
-    const updatedScripts = [newReport, ...(project.performanceScripts || [])];
+    setIsSavingReport(true);
     try {
-      if (typeof localStorage !== 'undefined') {
-        localStorage.setItem(`automatiqa_perf_scripts_${project.id}`, JSON.stringify(updatedScripts));
+      const reportId = `perf_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+      const analysisReport = analysisResult
+        ? typeof analysisResult === 'string' ? analysisResult : JSON.stringify(analysisResult)
+        : undefined;
+      let analysisReportUrl: string | undefined;
+      let sharedStorageFailed = false;
+      if (analysisReport) {
+        try {
+          analysisReportUrl = await savePerformanceAnalysisReport(project.id, reportId, analysisReport);
+        } catch (error) {
+          sharedStorageFailed = true;
+          console.error('Failed to store shared Performance API report:', error);
+        }
       }
-    } catch (e) {}
 
-    onUpdateProject({ ...project, performanceScripts: updatedScripts });
-    logActivity(user.email, user.name, `Archived AI Performance report: ${newReport.name}`, project.id, project.name);
-    toast.success('Performance report archived successfully.');
-    setIsReportNamingModalOpen(false);
-    setReportArtifactLabel('');
+      const newReport: PerformanceScript = {
+        id: reportId,
+        name: finalReportName,
+        artifactType: analysisReport ? 'analysis_report' : 'graph_report',
+        scenarios: [],
+        jmxContent: '',
+        analysisReport,
+        analysisReportUrl,
+        trendData: graphData.length > 0 ? JSON.stringify(graphData) : undefined,
+        createdAt: new Date().toISOString()
+      };
+      const updatedScripts = [newReport, ...(project.performanceScripts || [])];
+
+      await onUpdateProject({ ...project, performanceScripts: updatedScripts });
+      logActivity(user.email, user.name, `Archived AI Performance report: ${newReport.name}`, project.id, project.name);
+      toast.success(sharedStorageFailed
+        ? 'Report saved to the project repository, but its shared cloud copy failed. It may not be available on other devices.'
+        : 'Performance report archived successfully.');
+      setIsReportNamingModalOpen(false);
+      setReportArtifactLabel('');
+    } catch (error) {
+      console.error('Failed to persist Performance API report:', error);
+      toast.error(error instanceof Error ? `Could not persist report: ${error.message}` : 'Could not persist the report. Please retry.');
+    } finally {
+      setIsSavingReport(false);
+    }
   };
 
   const handleImportGraphFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1017,8 +1023,8 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
     return () => { cancelled = true; };
   }, [viewingReportId, archives, restoredAnalysisReports]);
 
-  const isGraphArtifact = (item: PerformanceScript) => Boolean(item.trendData) || /\bgraph\s*report\b/i.test(item.name || '');
-  const isAnalysisArtifact = (item: PerformanceScript) => Boolean(item.analysisReport) || /\b(?:ai\s+)?analysis\s*report\b/i.test(item.name || '');
+  const isGraphArtifact = (item: PerformanceScript) => item.artifactType === 'graph_report' || Boolean(item.trendData) || /\bgraph\s*report\b/i.test(item.name || '');
+  const isAnalysisArtifact = (item: PerformanceScript) => item.artifactType === 'analysis_report' || Boolean(item.analysisReport || item.analysisReportUrl) || /\b(?:ai\s+)?analysis\s*report\b/i.test(item.name || '');
   const countJmx = useMemo(() => archives.filter(item => !isAnalysisArtifact(item) && !isGraphArtifact(item) && Boolean(item.jmxContent || item.scenarios?.length)).length, [archives]);
   const countReports = useMemo(() => archives.filter(isAnalysisArtifact).length, [archives]);
   const countGraphs = useMemo(() => archives.filter(item => isGraphArtifact(item) && !isAnalysisArtifact(item)).length, [archives]);
@@ -1647,12 +1653,14 @@ const PerformanceTesting: React.FC<PerformanceTestingProps> = ({ project, user, 
                     <div className="flex flex-col gap-3 pt-6">
                       <button 
                          onClick={confirmSaveReport}
-                         disabled={!reportArtifactLabel.trim() || isReportDuplicate}
+                         disabled={!reportArtifactLabel.trim() || isReportDuplicate || isSavingReport}
                          className="w-full py-5 bg-emerald-600 text-white rounded-[1.5rem] font-black text-xs uppercase tracking-widest hover:bg-emerald-700 shadow-2xl shadow-emerald-100 active:scale-95 flex items-center justify-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                         <Save size={18} /> PERSIST TO REGISTRY
+                         {isSavingReport ? <Loader2 className="animate-spin" size={18} /> : <Save size={18} />}
+                         {isSavingReport ? 'PERSISTING REPORT...' : 'PERSIST TO REGISTRY'}
                       </button>
                       <button 
+                         disabled={isSavingReport}
                          onClick={() => { setIsReportNamingModalOpen(false); setReportArtifactLabel(''); }}
                          className="w-full py-5 bg-slate-100 text-slate-500 rounded-[1.5rem] font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-all active:scale-[0.98]"
                       >

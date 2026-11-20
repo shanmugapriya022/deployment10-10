@@ -83,7 +83,7 @@ import { ScreenshotUploader, ScreenshotFile } from './ScreenshotUploader';
 import { RAGStatusBadge } from './RAGStatusBadge';
 import { generateTestCasesFromScenario, generateFallbackTestCases } from '../geminiService';
 import { logActivity } from '../services/activityService';
-import { addDeletedIds, getDeletedIds, getAiTestCasesWithScenario } from '../services/projectService';
+import { addDeletedIds, getDeletedIds, getAiTestCasesWithScenario, saveScenariosToFirestore } from '../services/projectService';
 import { deleteFolderFromFirestore } from '../services/folderPersistenceService';
 import { JiraBugModal } from './JiraBugModal';
 import { createVideoFramesThumbnails } from '../utils/videoExtractor';
@@ -151,7 +151,7 @@ export const renderStepWithFrameTags = (
 interface TestCaseManagerProps {
   project: Project;
   user: User;
-  onUpdateProject: (p: Project) => void;
+  onUpdateProject: (p: Project, options?: { localOnly?: boolean }) => void | Promise<void>;
   onRunFolder?: (folderId: string) => void;
   onNavigateTab?: (tab: string, meta?: { folderId?: string; folderName?: string }) => void;
   initialView?: 'folders' | 'scenarios';
@@ -1590,6 +1590,15 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
           selectedCases.push(tc);
         }
       });
+    });
+    allFolderCases.forEach(testCase => {
+      if (
+        (selectedIds.has(testCase.id) || (testCase.testCaseId && selectedIds.has(testCase.testCaseId))) &&
+        !seenIds.has(testCase.id)
+      ) {
+        seenIds.add(testCase.id);
+        selectedCases.push(testCase);
+      }
     });
 
     if (selectedCases.length === 0) {
@@ -3085,6 +3094,7 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
         ...videoFieldsToSave
       } : null;
 
+      let targetFolderCasesToPersist = cases;
       let updatedScenarios = (project.scenarios || []).map(s => {
         // Target existing folder: append new test cases, memberScenarioIds, and video walkthrough
         if (!isNewFolderCreation && s.id === targetFolderId) {
@@ -3098,6 +3108,7 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
             if (tcKey && existingCaseIds.has(tcKey)) return false;
             return true;
           });
+          targetFolderCasesToPersist = uniqueNew;
 
           const mergedMemberIds = Array.from(new Set([...(s.memberScenarioIds || []), ...targetSourceIds]));
           return {
@@ -3163,7 +3174,32 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
         updatedScenarios = [newFolderObj, ...updatedScenarios];
       }
 
-      await Promise.resolve(onUpdateProject({ ...project, scenarios: updatedScenarios }));
+      const changedScenarioIds = new Set([targetFolderId, ...targetSourceIds]);
+      (project.scenarios || []).forEach(scenario => {
+        if (
+          scenario.isFolder &&
+          scenario.id !== targetFolderId &&
+          (scenario.memberScenarioIds || []).some(id => targetSourceIds.includes(id))
+        ) {
+          changedScenarioIds.add(scenario.id);
+        }
+      });
+      const generatedCaseIds = new Set(cases.map(testCase => testCase.id));
+      const targetFolderCaseIds = new Set(targetFolderCasesToPersist.map(testCase => testCase.id));
+      const scenariosToPersist = updatedScenarios
+        .filter(scenario => changedScenarioIds.has(scenario.id))
+        .map(scenario => {
+          const caseIdsToPersist = scenario.id === targetFolderId
+            ? targetFolderCaseIds
+            : targetSourceIds.includes(scenario.id) ? generatedCaseIds : new Set<string>();
+          return {
+            ...scenario,
+            testCases: (scenario.testCases || []).filter(testCase => caseIdsToPersist.has(testCase.id))
+          };
+        });
+
+      await Promise.resolve(onUpdateProject({ ...project, scenarios: updatedScenarios }, { localOnly: true }));
+      await saveScenariosToFirestore(project.id, scenariosToPersist, [], { partial: true });
       if (videoUploadPromise) {
         void videoUploadPromise.then(uploadedUrl => {
           if (!uploadedUrl || uploadedUrl.startsWith('blob:')) return;
@@ -4348,6 +4384,32 @@ export const TestCaseManager: React.FC<TestCaseManagerProps> = ({
 
               <div className="text-xs text-slate-500">
                 Showing <strong className="text-slate-800">{filteredFolders.length}</strong> Folders (<strong className="text-slate-800">{allFolderCases.length}</strong> Test Cases)
+              </div>
+            </div>
+          )}
+          {selectedCaseIds.size > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-3 p-3.5 bg-slate-900 text-white rounded-2xl shadow-md animate-in fade-in">
+              <span className="px-2.5 py-0.5 bg-teal-400 text-slate-950 text-[11px] font-black rounded-full">
+                {selectedCaseIds.size} Selected
+              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleBulkApprove}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-500 hover:bg-emerald-600 text-white rounded-xl text-xs font-bold transition-all cursor-pointer"
+                >
+                  <CheckCircle2 size={14} /> Bulk Approve
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedCaseIds(new Set());
+                    setSelectedScenarioIds(new Set());
+                  }}
+                  className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-xl text-xs font-medium transition-all cursor-pointer"
+                >
+                  Deselect All
+                </button>
               </div>
             </div>
           )}

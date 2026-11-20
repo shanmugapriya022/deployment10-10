@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import {
   saveProjectBackup,
   mergeAutomationScriptsWithBackup,
-  mergeScenariosWithBackup
+  mergeScenariosWithBackup,
+  mergeRecordedFlowsWithBackup
 } from "../services/storageBackupService";
 
 const complete = "export const completeSuite = true;\n".repeat(100);
@@ -74,3 +75,64 @@ assert.equal(restoredScenario.folderId, "folder-1");
 assert.equal(restoredScenario.description, "Scenario description remains available.");
 assert.equal(restoredScenario.expectedResults, "The expected state is shown.");
 console.log("Folder membership stored by scenario ID is restored and canonicalized to scenario record IDs.");
+
+const mergedRecordedFlows = mergeRecordedFlowsWithBackup("recorded-flow-locator-validation", [{
+  id: "flow-1",
+  steps: [{
+    id: "step-1",
+    action: "click",
+    locator: {
+      primary: {
+        type: "css",
+        value: "[data-testid='continue']",
+        playwright: "page.getByTestId('continue').click()"
+      },
+      alternatives: []
+    }
+  }]
+}], new Set(), [{
+  id: "flow-1",
+  steps: [{
+    id: "step-1",
+    action: "click",
+    locator: {
+      primary: {
+        type: "css",
+        value: "element",
+        playwright: "page.locator('element').click()"
+      },
+      alternatives: []
+    }
+  }]
+}]);
+
+assert.equal(mergedRecordedFlows[0].steps[0].locator.primary.value, "[data-testid='continue']");
+assert.equal(mergedRecordedFlows[0].steps[0].locator.primary.playwright, "page.getByTestId('continue').click()");
+console.log("Recorded-flow merges preserve exact locators over same-length generic backup steps.");
+
+const restoredRecordedFlows = mergeRecordedFlowsWithBackup("recorded-flow-locator-restore-validation", [{
+  id: "flow-2",
+  steps: [{
+    id: "step-2",
+    action: "click",
+    locator: { primary: { type: "css", value: "element" }, alternatives: [] }
+  }]
+}], new Set(), [{
+  id: "flow-2",
+  steps: [{
+    id: "step-2",
+    action: "click",
+    locator: {
+      primary: {
+        type: "role",
+        value: "Submit",
+        playwright: "page.getByRole('button', { name: 'Submit' }).click()"
+      },
+      alternatives: []
+    }
+  }]
+}]);
+
+assert.equal(restoredRecordedFlows[0].steps[0].locator.primary.value, "Submit");
+assert.equal(restoredRecordedFlows[0].steps[0].locator.primary.playwright, "page.getByRole('button', { name: 'Submit' }).click()");
+console.log("Recorded-flow merges restore exact backup locators when the current copy is generic.");

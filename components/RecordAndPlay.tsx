@@ -277,6 +277,47 @@ function sanitizeClientUrl(rawUrl: string, baseUrl?: string): string {
   return '';
 }
 
+const isConcreteRecordedLocator = (value: unknown): value is string => {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  const locator = value.trim();
+  if (/^(?:element|target element|unknown|locator|body)$/i.test(locator)) return false;
+  return !/^(?:await\s+)?page\.locator\(['"](?:element|target element|unknown|body)['"]\)(?:\.\w+\([^)]*\))?;?$/i.test(locator);
+};
+
+const getStepLocatorDisplay = (step: RecordedStep, showPlaywrightCode: boolean): string => {
+  if (step.action === 'navigate') {
+    const url = step.value || step.url || step.expectedUrl || '';
+    return showPlaywrightCode && url
+      ? `await page.goto('${url.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}')`
+      : url || step.elementName || 'Navigation';
+  }
+
+  const primary = step.locator?.primary;
+  const structured = step.structuredLocator || step.locator?.structuredLocator || primary?.structuredLocator;
+  if (showPlaywrightCode && isConcreteRecordedLocator(primary?.playwright)) {
+    return primary.playwright;
+  }
+  if (structured) {
+    return showPlaywrightCode
+      ? toPlaywrightScript(structured)
+      : String(structured.name || structured.value || primary?.value || '');
+  }
+
+  const legacyStep = step as RecordedStep & { selector?: string };
+  const capturedLocator = [
+    primary?.value,
+    legacyStep.selector,
+    ...(Array.isArray(step.locator?.alternatives) ? step.locator.alternatives.map(locator => locator.value) : [])
+  ].find(isConcreteRecordedLocator);
+  if (capturedLocator) {
+    return showPlaywrightCode
+      ? `page.locator('${capturedLocator.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}')`
+      : capturedLocator;
+  }
+
+  return String(primary?.value || step.elementName || 'element');
+};
+
 export type BrowserOptionId = 'chrome' | 'firefox' | 'edge' | 'safari' | 'mobile_chrome' | 'mobile_safari';
 
 export interface PlaybackBrowserOption {
@@ -1659,7 +1700,6 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
     }, 1000);
 
     let hasFailed = false;
-
     // Queue data structures for background SSE stream reader and foreground step runner
     const stepQueue: any[] = [];
     let isStreamEnded = false;
@@ -3158,12 +3198,21 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
         }
       }
 
-      // Generate Playwright code if missing
-      let playwrightCode = eventData.playwright || (eventData.locator?.primary?.playwright);
+      const sourceLocator = eventData.locator || {};
+      const sourcePrimary = sourceLocator.primary || {};
+      const structuredLocator = eventData.structuredLocator ||
+        sourceLocator.structuredLocator ||
+        sourcePrimary.structuredLocator;
+      const navigationUrl = eventData.value || eventData.url ||
+        (isConcreteRecordedLocator(sourcePrimary.value) ? sourcePrimary.value : '');
+      const capturedLocatorValue = eventData.action === 'navigate'
+        ? navigationUrl
+        : [sourcePrimary.value, eventData.selector].find(isConcreteRecordedLocator);
+      let playwrightCode = [eventData.playwright, sourcePrimary.playwright].find(isConcreteRecordedLocator);
       if (!playwrightCode) {
-        const selector = eventData.locator?.primary?.value || eventData.selector || 'body';
+        const selector = capturedLocatorValue || 'body';
         if (eventData.action === 'navigate') {
-          playwrightCode = `await page.goto('${eventData.value}')`;
+          playwrightCode = `await page.goto('${navigationUrl}')`;
         } else if (eventData.action === 'click') {
           playwrightCode = `await page.locator('${selector}').click()`;
         } else if (eventData.action === 'fill' || eventData.action === 'type') {
@@ -3181,19 +3230,26 @@ const RecordAndPlay: React.FC<RecordAndPlayProps> = ({ project, user, onUpdatePr
         }
       }
 
+      const locator: UniversalLocator = {
+        ...sourceLocator,
+        primary: {
+          ...sourcePrimary,
+          type: sourcePrimary.type || (eventData.action === 'navigate' ? 'url' : 'css'),
+          value: capturedLocatorValue || (eventData.action === 'navigate' ? eventData.value : eventData.selector || 'body'),
+          playwright: playwrightCode,
+          ...(structuredLocator ? { structuredLocator } : {})
+        },
+        alternatives: Array.isArray(sourceLocator.alternatives) ? sourceLocator.alternatives : [],
+        ...(structuredLocator ? { structuredLocator } : {})
+      };
+
       const step: RecordedStep = {
         id: Math.random().toString(36).substring(7),
         action: eventData.action === 'type' ? 'fill' : eventData.action,
         value: eventData.value,
         elementName: eventData.elementName,
-        locator: eventData.locator || {
-          primary: {
-            type: eventData.action === 'navigate' ? 'url' : 'css',
-            value: eventData.action === 'navigate' ? eventData.value : (eventData.selector || 'body'),
-            playwright: playwrightCode
-          },
-          alternatives: []
-        },
+        locator,
+        structuredLocator,
         screen: resolvedScreen || "MainPage",
         platform: eventData.platform || "web",
         timestamp: eventData.timestamp || Date.now(),
@@ -8456,9 +8512,7 @@ ${currentSteps.map(step => formatStepToScript(step, 'web')).join('\n')}
 
                         <div className="bg-slate-950/50 rounded-lg p-3 border border-slate-800/50">
                           <code className="text-[10px] font-mono text-emerald-400 block break-all">
-                            {selectedTool === 'Playwright' && typeof step.locator?.primary?.playwright === 'string' && step.locator.primary.playwright
-                              ? step.locator.primary.playwright 
-                              : String(step.locator?.primary?.value || step.elementName || 'element')}
+                            {getStepLocatorDisplay(step, selectedTool === 'Playwright')}
                           </code>
                         </div>
 

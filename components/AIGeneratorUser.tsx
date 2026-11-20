@@ -65,7 +65,7 @@ import {
 interface AIGeneratorUserProps {
   project: Project;
   user: { email: string, name: string };
-  onUpdateProject: (updatedProject: Project) => void;
+  onUpdateProject: (updatedProject: Project, options?: { localOnly?: boolean }) => void | Promise<void>;
 }
 
 const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpdateProject }) => {
@@ -1321,8 +1321,9 @@ const AIGeneratorUser: React.FC<AIGeneratorUserProps> = ({ project, user, onUpda
 
       const finalStoriesList = [...updatedFolderList, ...preparedStories];
 
-      // Wait for the project write before closing the save flow or reporting success.
-      await Promise.resolve(onUpdateProject({ ...project, userStories: finalStoriesList }));
+      // Update the UI and local backups; the story persistence service below
+      // handles Firestore writes without a duplicate full-project update.
+      await Promise.resolve(onUpdateProject({ ...project, userStories: finalStoriesList }, { localOnly: true }));
 
       setIsFolderSelectModalOpen(false);
       setInlineNewFolderName('');
