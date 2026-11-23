@@ -1,0 +1,50 @@
+
+# AutomatiQA Staging: GitHub -> Cloud Build -> Artifact Registry -> Cloud Run
+
+substitutions:
+  _AR_REGION: asia-southeast1
+  _RUN_REGION: asia-south1
+  _REPOSITORY: automatiqa
+  _SERVICE: automatiqa-staging
+
+steps:
+  # Step 1: Build the Staging Docker image
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_AR_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:$COMMIT_SHA
+      - .
+
+  # Step 2: Push the image to Artifact Registry
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_AR_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:$COMMIT_SHA
+
+  # Step 3: Deploy only to the Staging Cloud Run service
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_AR_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:$COMMIT_SHA
+      - --region=${_RUN_REGION}
+      - --project=$PROJECT_ID
+      - --platform=managed
+      - --allow-unauthenticated
+      - --memory=4Gi
+      - --cpu=4
+      - --timeout=900
+      - --concurrency=10
+      - --update-env-vars=GEMINI_MODEL=gemini-3.8-flash,ENABLE_BACKUP_REPLICATION=false
+      - --update-secrets=GEMINI_API_KEY=GEMINI_API_KEY:latest
+      - --service-account=410621921692-compute@developer.gserviceaccount.com
+      - --quiet
+
+images:
+  - ${_AR_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:$COMMIT_SHA
+
+options:
+  logging: CLOUD_LOGGING_ONLY
