@@ -10982,10 +10982,15 @@ function calculateCreditsConsumedServer(
   featureName: string,
   itemCount: number = 1,
   cached: boolean = false,
-  actionType: 'analysis' | 'export' = 'analysis',
+  actionType: string = 'analysis',
   planType: 'Trial' | 'Paid' = 'Trial'
 ): number {
-  if (cached && actionType === 'analysis') return 0;
+  // Credit logs historically persist COPY / DOWNLOAD as action names, while
+  // new calls may use `copy` / `download` and checks use `export`. Normalize
+  // them all here so a later balance rebuild does not count exports as AI work.
+  const normalizedAction = String(actionType || 'analysis').toLowerCase();
+  const isExport = ['export', 'download', 'copy', 'csv', 'excel', 'xlsx'].includes(normalizedAction);
+  if (cached && !isExport) return 0;
   
   // Normalize canonical feature keys (for example, "ui_testing") and older
   // display-name values to the same matching form.
@@ -11000,7 +11005,7 @@ function calculateCreditsConsumedServer(
 
   // 1. AI User Stories Generation: Trial (5 / 20), Paid (5 / 10)
   if (f.includes('user_stories') || f.includes('user_story') || f.includes('user stor') || f.includes('story') || f.includes('stories')) {
-    if (actionType === 'export') {
+    if (isExport) {
       return planType === 'Paid' ? 10 : 20;
     }
     return 5;
@@ -11008,65 +11013,65 @@ function calculateCreditsConsumedServer(
 
   // 2. AI Test Scenario Generation: Trial (10 / 20), Paid (10 / 20)
   if (f.includes('scenario')) {
-    if (actionType === 'export') return 20;
+    if (isExport) return 20;
     return 10;
   }
 
   // 3. AI Test Cases Generation: Trial (20 / 20), Paid (20 / 20)
   if (f.includes('test case') || f.includes('cases') || f.includes('manual test')) {
-    if (actionType === 'export') return 20;
+    if (isExport) return 20;
     return 20;
   }
 
   // 4. Automation - Script Generator: Trial (50 / 50), Paid (50 / 50)
   if (f.includes('script') && !f.includes('record') && !f.includes('jmeter')) {
-    if (actionType === 'export') return 50;
+    if (isExport) return 50;
     return 50;
   }
 
   // 5. Automation - Record & Play - Web App: Trial (100 / 50), Paid (50 / 50)
   if (f.includes('record') && f.includes('web') && !f.includes('mobile')) {
-    if (actionType === 'export') return 50;
+    if (isExport) return 50;
     return planType === 'Paid' ? 50 : 100;
   }
 
   // 6. Automation - Record & Play - Mobile App: Trial and Paid (50 / 20)
   if (f.includes('mobile') || f.includes('appium')) {
-    if (actionType === 'export') return 20;
+    if (isExport) return 20;
     return 50;
   }
 
   // Generic record and play
   if (f.includes('record') || f.includes('play')) {
-    if (actionType === 'export') return 50;
+    if (isExport) return 50;
     return 100;
   }
 
   // 7. UI Testing: Trial (50 / 50), Paid (50 / 50)
   if (f.includes('ui test') || f.includes('figma') || f.includes('visual')) {
-    if (actionType === 'export') return 50;
+    if (isExport) return 50;
     return 50;
   }
 
   // 8. API Testing: Trial (50 / 50), Paid (50 / 50)
   if (f.includes('api') && !f.includes('perf')) {
-    if (actionType === 'export') return 50;
+    if (isExport) return 50;
     return 50;
   }
 
   // 9. API Performance Testing: Trial (100 / 50), Paid (100 / 50)
   if (f.includes('api perf') || (f.includes('api') && f.includes('perf'))) {
-    if (actionType === 'export') return 50;
+    if (isExport) return 50;
     return 100;
   }
 
   // 10. Web Performance Testing: Trial (100 / 50), Paid (100 / 50)
   if (f.includes('web perf') || f.includes('lighthouse') || f.includes('web performance') || f.includes('jmeter')) {
-    if (actionType === 'export') return 50;
+    if (isExport) return 50;
     return 100;
   }
 
-  return actionType === 'export' ? 20 : 20;
+  return isExport ? 20 : 20;
 }
 
 function formatToISTServer(timestamp: number = Date.now()): string {

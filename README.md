@@ -221,7 +221,7 @@ Every user action is categorized into **Analysis** (AI generation/execution), **
 
 | # | Module / Feature | Trial Analysis | Trial Copy | Trial Download | Paid Analysis | Paid Copy | Paid Download |
 | :-: | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| 1 | **AI User Stories Generation** | 5 | 10 | 10 | 5 | 10 | 10 |
+| 1 | **AI User Stories Generation** | 5 | 10 | 20 | 5 | 10 | 20 |
 | 2 | **AI Test Scenario Generation** | 10 | 20 | 20 | 10 | 20 | 20 |
 | 3 | **AI Test Cases Generation** | 20 | 20 | 20 | 20 | 20 | 20 |
 | 4 | **Automation — Script Generator** | 50 | 50 | 50 | 50 | 50 | 50 |

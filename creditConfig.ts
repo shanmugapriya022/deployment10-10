@@ -22,7 +22,7 @@ export interface ModuleCreditRates {
  * Strictly adheres to project-level rules:
  *
  * Feature                                | Trial Analysis | Trial Copy | Trial Download | Paid Analysis | Paid Copy | Paid Download
- * 1. AI User Stories Generation          | 5              | 20         | 20             | 5             | 10        | 10
+ * 1. AI User Stories Generation          | 5              | 20         | 20             | 5             | 10        | 20
  * 2. AI Test Scenario Generation         | 10             | 20         | 20             | 10            | 20        | 20
  * 3. AI Test Cases Generation            | 20             | 20         | 20             | 20            | 20        | 20
  * 4. Automation - Script Generator       | 50             | 50         | 50             | 50            | 50        | 50
@@ -43,8 +43,8 @@ export const FEATURE_CREDIT_CONFIG: Record<string, ModuleCreditRates> = {
     featureKey: 'ai_user_stories',
     displayName: 'AI User stories generation',
     description: 'Generate User Stories from requirements, BRD, or wireframes. Export/copy to Jira or CSV.',
-    trial: { analysis: 5, copy: 10, download: 10 },
-    paid: { analysis: 5, copy: 10, download: 10 }
+    trial: { analysis: 5, copy: 10, download: 20 },
+    paid: { analysis: 5, copy: 10, download: 20 }
   },
   ai_scenarios: {
     featureKey: 'ai_scenarios',

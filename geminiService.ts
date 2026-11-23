@@ -3328,7 +3328,9 @@ export const generateTestCasesFromScenario = async (scenario: any, context: any 
 
       const rawScreenshots = context?.screenshots || scenario?.attachments || scenario?.screenshots || [];
       if (Array.isArray(rawScreenshots) && rawScreenshots.length > 0) {
-        const sampled = sampleVisualInputs(rawScreenshots, 6);
+        // Preserve every uploaded screenshot for test-case generation. Sampling
+        // can silently drop screens and their unique workflows from coverage.
+        const sampled = sampleVisualInputs(rawScreenshots, Math.max(6, rawScreenshots.length));
         const withTimeout = async (promise: Promise<any>, ms: number = 3000) => {
           let timer: any;
           const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Timeout')), ms); });
@@ -3429,11 +3431,12 @@ export const generateTestCasesFromScenario = async (scenario: any, context: any 
     (scenario?.title && /video|walkthrough|screen\s*recording/i.test(scenario.title))
   );
   
-  // Combine screenshots and video frame images (allow up to 8 sampled keyframes for optimal speed & reliability)
+  // Keep all uploaded screenshots so each screen and its visible workflows are
+  // available to the model. Video frames remain bounded by extraction upstream.
   const allVisualInputs = [...screenshotsToUse, ...videoFramesToUse];
   const maxVisualInputs = videoFramesToUse?.length > 0
     ? Math.min(24, videoFramesToUse.length + screenshotsToUse.length)
-    : 6;
+    : Math.max(6, screenshotsToUse.length);
   const imageParts = extractImageParts(allVisualInputs, maxVisualInputs);
   const cleanContext = sanitizeContextForPrompt(context);
 
@@ -3506,7 +3509,9 @@ STRICT UI SCREENSHOT ANALYSIS REQUIREMENT:
 ========================================
 - Attached Screenshots: ${screenshotsToUse.length} UI screenshot(s) attached as visual image input.
 - You MUST analyze all visual UI elements, buttons, input fields, labels, headers, tables, cards, dropdowns, navigation menus, icons, and workflow states visible in the provided screenshot(s).
-- Generate test cases derived STRICTLY from analyzing these UI mockup screenshots and their visual interactions. Include explicit test steps referencing the visual elements and labels seen in the screenshots.` : ''}
+- First inventory each distinct screen, visible control, content region, and UI state across every screenshot. Then map the inventory to test cases and ensure every meaningful item is covered by at least one case.
+- Cover each distinct user workflow and user story evidenced by the screenshots. Include appropriate positive flows, negative/validation paths, boundary states, navigation, and UI/content checks where supported by visible evidence.
+- Generate test cases derived STRICTLY from analyzing these UI mockup screenshots and their visual interactions. Include explicit test steps referencing the visual elements and labels seen in the screenshots. Combine related checks only when they remain independently verifiable; do not omit coverage to keep the list short.` : ''}
 
 Special Rule: If an OTP-based login flow is detected, generate test cases assuming Global Login is used to bypass OTP limitations. Mention this in the test cases.
 
@@ -3564,7 +3569,7 @@ MANDATORY QUANTITY & ACCURACY DIRECTIVES:
 ${isVideoWalkthrough ? `
    - For this video upload scenario, generate test cases based strictly on the extracted key frames and observed flow.
    - Create as many relevant, distinct test cases as are required to accurately cover the entire user flow shown in the key frames.` : `
-   - Generate a thorough set of distinct, production-ready test cases tailored directly to the specific scenario (typically 4 to 8 test cases per scenario). When processing multiple scenarios, ensure every scenario receives dedicated, independent test case coverage.`}
+   - Generate the number of distinct, production-ready test cases required for complete coverage. There is no target or maximum count: do not stop at a customary number. When processing multiple scenarios, ensure every scenario receives dedicated, independent test case coverage.`}
    - Include Positive (happy path workflows), Negative (validation errors and invalid inputs), and UI/Boundary test cases.
    - NEVER return generic boilerplate or repeated titles like "Verify happy path execution".
 

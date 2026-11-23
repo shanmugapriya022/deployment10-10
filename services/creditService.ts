@@ -71,7 +71,7 @@ export const PAID_PLAN = {
 
   AI_USER_STORIES: {
     analysis: 5,
-    downloadCopy: 10
+    downloadCopy: 20
   },
 
   AI_TEST_SCENARIO: {
@@ -144,7 +144,7 @@ export interface FeatureCreditRule {
  * Strictly adheres to the project-level credit specifications:
  * 
  * Feature                                | Trial Analysis | Trial Export | Paid Analysis | Paid Export
- * 1. AI User Stories Generation          | 5              | 20           | 5             | 10
+ * 1. AI User Stories Generation          | 5              | 20           | 5             | 20
  * 2. AI Test Scenario Generation         | 10             | 20           | 10            | 20
  * 3. AI Test Cases Generation            | 20             | 20           | 20            | 20
  * 4. Automation - Script Generator       | 50             | 50           | 50            | 50
@@ -160,7 +160,7 @@ export const FEATURE_CREDIT_RULES: Record<string, FeatureCreditRule> = {
     featureKey: 'ai_user_stories',
     displayName: 'AI User stories generation',
     trial: { analysis: 5, export: 20 },
-    paid: { analysis: 5, export: 10 },
+    paid: { analysis: 5, export: 20 },
     description: 'Generate User Stories from requirements, BRD, or wireframes. Export/copy to Jira or CSV.'
   },
   ai_scenarios: {
